@@ -1,6 +1,7 @@
 /* ==========================================================================
    SetTimer - Drag & Drop Module (dragdrop.js)
    Enables drag-and-drop reordering of exercise Activity cards in Edit Mode
+   without interfering with text selection or focus changes in input fields.
    ========================================================================== */
 
 (function (global) {
@@ -11,29 +12,34 @@
   function attachDragAndDrop(containerEl, onReorderCallback) {
     if (!containerEl) return;
 
-    const cards = containerEl.querySelectorAll('.activity-card[ data-activity-index]');
+    const cards = containerEl.querySelectorAll('.activity-card[data-activity-index]');
     cards.forEach(function (card) {
       const index = parseInt(card.getAttribute('data-activity-index'), 10);
       const handle = card.querySelector('.drag-handle');
 
-      // Allow dragging mainly when grabbing the card or drag handle,
-      // but prevent dragging when user is actively selecting text in an input field.
-      card.addEventListener('mousedown', function (e) {
-        const tag = (e.target && e.target.tagName) ? e.target.tagName.toLowerCase() : '';
-        if (tag === 'input' || tag === 'button' || tag === 'select' || tag === 'textarea') {
-          card.setAttribute('draggable', 'false');
-        } else {
-          card.setAttribute('draggable', 'true');
-        }
-      });
+      // Keep draggable="false" by default so input selection, focus, and blur
+      // work natively without HTML5 drag-and-drop hijacking mouse events.
+      card.setAttribute('draggable', 'false');
 
       if (handle) {
-        handle.addEventListener('mouseenter', function () {
+        handle.addEventListener('mousedown', function () {
           card.setAttribute('draggable', 'true');
+        });
+        handle.addEventListener('mouseup', function () {
+          card.setAttribute('draggable', 'false');
+        });
+        handle.addEventListener('mouseleave', function () {
+          if (draggedIndex === null) {
+            card.setAttribute('draggable', 'false');
+          }
         });
       }
 
       card.addEventListener('dragstart', function (e) {
+        if (card.getAttribute('draggable') !== 'true') {
+          e.preventDefault();
+          return;
+        }
         draggedIndex = index;
         card.classList.add('dragging');
         if (e.dataTransfer) {
@@ -44,13 +50,15 @@
 
       card.addEventListener('dragend', function () {
         draggedIndex = null;
+        card.setAttribute('draggable', 'false');
         card.classList.remove('dragging');
         clearDropIndicators(containerEl);
       });
 
       card.addEventListener('dragover', function (e) {
+        if (draggedIndex === null) return;
         e.preventDefault();
-        if (draggedIndex === null || draggedIndex === index) return;
+        if (draggedIndex === index) return;
         if (e.dataTransfer) {
           e.dataTransfer.dropEffect = 'move';
         }
@@ -69,11 +77,14 @@
       });
 
       card.addEventListener('drop', function (e) {
+        if (draggedIndex === null) return;
         e.preventDefault();
         clearDropIndicators(containerEl);
         const fromIndex = draggedIndex !== null
           ? draggedIndex
           : parseInt(e.dataTransfer ? e.dataTransfer.getData('text/plain') : '-1', 10);
+
+        card.setAttribute('draggable', 'false');
 
         if (isNaN(fromIndex) || fromIndex < 0 || fromIndex === index) {
           draggedIndex = null;

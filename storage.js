@@ -87,7 +87,7 @@
 
     return {
       id: act.id || generateId('act'),
-      name: String(act.name || 'Exercise').trim() || 'Exercise',
+      name: String(act.name !== undefined ? act.name : 'Exercise').trim() || 'Exercise',
       sets: sets,
       timePerSet: timePerSet,
       restBetweenSets: isNaN(restBetweenSets) ? 15 : restBetweenSets,
@@ -102,7 +102,7 @@
 
     return {
       id: routine.id || generateId('routine'),
-      name: String(routine.name || 'Untitled Routine').trim() || 'Untitled Routine',
+      name: String(routine.name !== undefined ? routine.name : 'Untitled Routine').trim() || 'Untitled Routine',
       betweenActivityRest: safeBetweenRest,
       updatedAt: routine.updatedAt || new Date().toISOString(),
       activities: rawActivities.map(function (a) {
@@ -132,14 +132,19 @@
     }
   }
 
+  /**
+   * Saves routines to localStorage WITHOUT replacing the live in-memory object
+   * references so active event listeners and inputs never become detached.
+   */
   function saveRoutines(routines) {
-    const sanitized = (Array.isArray(routines) ? routines : []).map(sanitizeRoutine);
+    const list = Array.isArray(routines) ? routines : [];
+    const serializedPayload = list.map(sanitizeRoutine);
     try {
-      localStorage.setItem(ROUTINES_STORAGE_KEY, JSON.stringify(sanitized));
+      localStorage.setItem(ROUTINES_STORAGE_KEY, JSON.stringify(serializedPayload));
     } catch (err) {
       console.warn('SetTimer Storage: Unable to write routines to localStorage', err);
     }
-    return sanitized;
+    return list;
   }
 
   function loadActiveRoutineId(routines) {
@@ -188,7 +193,7 @@
     const between = Math.max(0, parseInt(betweenActivityRest !== undefined ? betweenActivityRest : 20, 10)) || 0;
     return sanitizeActivity({
       id: generateId('act'),
-      name: '',
+      name: 'New Exercise',
       sets: 3,
       timePerSet: 30,
       restBetweenSets: 15,

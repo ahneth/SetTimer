@@ -53,7 +53,6 @@
     const routineOrder = [];
 
     rows.forEach(function (row, idx) {
-      // Support flexible column naming so user-edited Excel sheets also import cleanly
       const routineNameRaw =
         row['Routine Name'] !== undefined ? row['Routine Name'] :
         row['Routine'] !== undefined ? row['Routine'] :
@@ -136,24 +135,22 @@
       const wb = global.XLSX.utils.book_new();
       const ws = global.XLSX.utils.json_to_sheet(rows);
 
-      // Set readable column widths
       ws['!cols'] = [
-        { wch: 24 }, // Routine ID
-        { wch: 28 }, // Routine Name
-        { wch: 26 }, // Rest Between Activities (s)
-        { wch: 15 }, // Activity Order
-        { wch: 26 }, // Activity
-        { wch: 16 }, // Number of Sets
-        { wch: 18 }, // Time per Set (s)
-        { wch: 22 }, // Rest Between Sets (s)
-        { wch: 24 }  // Rest After Activity (s)
+        { wch: 24 },
+        { wch: 28 },
+        { wch: 26 },
+        { wch: 15 },
+        { wch: 26 },
+        { wch: 16 },
+        { wch: 18 },
+        { wch: 22 },
+        { wch: 24 }
       ];
 
       global.XLSX.utils.book_append_sheet(wb, ws, 'SetTimer_Routines');
       global.XLSX.writeFile(wb, baseName + '.xlsx');
       return { format: 'xlsx', filename: baseName + '.xlsx', count: rows.length };
     } else {
-      // Fallback CSV export if offline / CDN blocked
       const headers = [
         'Routine ID',
         'Routine Name',

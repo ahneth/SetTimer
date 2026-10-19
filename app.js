@@ -16,8 +16,12 @@
     return routines.find(function (r) { return r.id === activeRoutineId; }) || routines[0] || null;
   }
 
+  /**
+   * Saves all routines to localStorage in-place without replacing live object
+   * references or destroying focused DOM inputs.
+   */
   function persistAll(showFeedback, message) {
-    routines = global.SetTimerStorage.saveRoutines(routines);
+    global.SetTimerStorage.saveRoutines(routines);
     global.SetTimerStorage.saveActiveRoutineId(activeRoutineId);
     updateStorageBadge();
     renderRoutineSummaryBar();
@@ -55,6 +59,20 @@
   function renderRoutineSelector() {
     const selectEl = document.getElementById('routine-selector');
     if (!selectEl) return;
+
+    // Update options in-place if count & IDs match so we don't disrupt an open dropdown
+    const existingOptions = selectEl.querySelectorAll('option');
+    const sameList = existingOptions.length === routines.length &&
+      Array.from(existingOptions).every(function (opt, i) { return opt.value === routines[i].id; });
+
+    if (sameList) {
+      routines.forEach(function (routine, i) {
+        const summary = global.SetTimerEngine.calculateRoutineSummary(routine);
+        existingOptions[i].textContent = routine.name + ' (' + routine.activities.length + ' activities • ' + global.SetTimerEngine.formatSeconds(summary.totalSeconds) + ')';
+        existingOptions[i].selected = (routine.id === activeRoutineId);
+      });
+      return;
+    }
 
     selectEl.innerHTML = '';
     routines.forEach(function (routine) {
@@ -102,8 +120,38 @@
     renderRoutineSelector();
   }
 
+  /**
+   * Updates an individual Activity card's subtotal badge and connector label
+   * in-place without re-rendering container.innerHTML (preserving input focus).
+   */
+  function updateActivityCardInPlace(idx) {
+    const routine = getActiveRoutine();
+    if (!routine || !routine.activities[idx]) return;
+
+    const act = routine.activities[idx];
+    const actTotalWork = (Math.max(1, parseInt(act.sets, 10) || 1)) * (Math.max(1, parseInt(act.timePerSet, 10) || 1));
+    const actTotalSetRest = Math.max(0, (Math.max(1, parseInt(act.sets, 10) || 1) - 1)) * Math.max(0, parseInt(act.restBetweenSets, 10) || 0);
+    const actSubtotalSec = actTotalWork + actTotalSetRest;
+
+    const container = document.getElementById('activities-list-container');
+    if (!container) return;
+
+    const subtotalEl = container.querySelector('[data-subtotal-index="' + idx + '"]');
+    if (subtotalEl) {
+      subtotalEl.textContent = 'Subtotal: ' + global.SetTimerEngine.formatSeconds(actSubtotalSec);
+    }
+
+    // If this activity's name changed and there is a preceding connector bar, update its "before <Name>" label
+    if (idx > 0) {
+      const prevConnectorNameEl = container.querySelector('[data-next-activity-name-for="' + (idx - 1) + '"]');
+      if (prevConnectorNameEl) {
+        prevConnectorNameEl.textContent = act.name || ('Exercise #' + (idx + 1));
+      }
+    }
+  }
+
   function escapeHtml(str) {
-    return String(str || '')
+    return String(str !== undefined && str !== null ? str : '')
       .replace(/&/g, '&amp;')
       .replace(/</g, '&lt;')
       .replace(/>/g, '&gt;')
@@ -136,16 +184,16 @@
       const betweenRestVal = act.restAfterActivity !== undefined ? act.restAfterActivity : routine.betweenActivityRest;
 
       htmlParts.push(
-        '<div class="activity-card bg-slate-800/90 border border-slate-700/80 rounded-xl p-4 shadow-sm hover:border-slate-600" data-activity-index="' + idx + '" data-activity-id="' + escapeHtml(act.id) + '" draggable="true">' +
+        '<div class="activity-card bg-slate-800/90 border border-slate-700/80 rounded-xl p-4 shadow-sm hover:border-slate-600" data-activity-index="' + idx + '" data-activity-id="' + escapeHtml(act.id) + '" draggable="false">' +
           '<div class="flex flex-wrap items-center justify-between gap-2 mb-3 pb-2.5 border-b border-slate-700/60">' +
             '<div class="flex items-center gap-2.5">' +
               '<span class="drag-handle inline-flex items-center justify-center w-8 h-8 rounded-lg bg-slate-900/90 border border-slate-700 text-slate-400 hover:text-white hover:border-slate-500" title="Drag to reorder exercise">' +
-                '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8h16M4 16h16"/></svg>' +
+                '<svg class="w-4 h-4 pointer-events-none" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8h16M4 16h16"/></svg>' +
               '</span>' +
               '<span class="inline-flex items-center justify-center px-2.5 py-0.5 rounded-md text-xs font-bold bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">' +
                 'Exercise #' + (idx + 1) +
               '</span>' +
-              '<span class="text-xs text-slate-400 font-medium">' +
+              '<span class="text-xs text-slate-400 font-medium" data-subtotal-index="' + idx + '">' +
                 'Subtotal: ' + global.SetTimerEngine.formatSeconds(actSubtotalSec) +
               '</span>' +
             '</div>' +
@@ -193,7 +241,7 @@
           '<div class="my-2 px-4 py-2 rounded-lg bg-yellow-500/10 border border-yellow-400/30 flex flex-wrap items-center justify-between gap-2 text-xs">' +
             '<div class="flex items-center gap-2 text-yellow-200 font-medium">' +
               '<span class="inline-block w-2.5 h-2.5 rounded-full bg-yellow-400"></span>' +
-              '<span>Rest in between Activities (before <strong>' + escapeHtml(nextAct ? nextAct.name : 'Next Activity') + '</strong>):</span>' +
+              '<span>Rest in between Activities (before <strong data-next-activity-name-for="' + idx + '">' + escapeHtml(nextAct ? nextAct.name : 'Next Activity') + '</strong>):</span>' +
             '</div>' +
             '<div class="flex items-center gap-2">' +
               '<input type="number" min="0" max="3600" class="w-24 bg-slate-900 border border-yellow-400/40 rounded-md px-2.5 py-1 text-yellow-100 font-semibold text-right input-between-activity-rest-item" data-index="' + idx + '" value="' + escapeHtml(betweenRestVal) + '" />' +
@@ -206,70 +254,125 @@
 
     container.innerHTML = htmlParts.join('');
 
-    // Attach input listeners
+    // Attach input listeners that dynamically resolve getActiveRoutine() and update in-place
     container.querySelectorAll('.input-activity-name').forEach(function (input) {
       input.addEventListener('input', function (e) {
+        const currentRoutine = getActiveRoutine();
         const idx = parseInt(e.target.getAttribute('data-index'), 10);
-        if (routine.activities[idx]) {
-          routine.activities[idx].name = e.target.value;
+        if (currentRoutine && currentRoutine.activities[idx]) {
+          currentRoutine.activities[idx].name = e.target.value;
+          updateActivityCardInPlace(idx);
           persistAll(false);
         }
       });
-      input.addEventListener('change', function () {
-        renderActivitiesList();
+      input.addEventListener('blur', function (e) {
+        const currentRoutine = getActiveRoutine();
+        const idx = parseInt(e.target.getAttribute('data-index'), 10);
+        if (currentRoutine && currentRoutine.activities[idx]) {
+          const trimmed = String(e.target.value || '').trim() || ('Exercise ' + (idx + 1));
+          currentRoutine.activities[idx].name = trimmed;
+          e.target.value = trimmed;
+          updateActivityCardInPlace(idx);
+          persistAll(false);
+        }
       });
     });
 
     container.querySelectorAll('.input-activity-sets').forEach(function (input) {
       input.addEventListener('input', function (e) {
+        const currentRoutine = getActiveRoutine();
         const idx = parseInt(e.target.getAttribute('data-index'), 10);
-        const val = Math.max(1, parseInt(e.target.value, 10) || 1);
-        if (routine.activities[idx]) {
-          routine.activities[idx].sets = val;
+        const parsed = parseInt(e.target.value, 10);
+        if (currentRoutine && currentRoutine.activities[idx] && !isNaN(parsed) && parsed >= 1) {
+          currentRoutine.activities[idx].sets = parsed;
+          updateActivityCardInPlace(idx);
           persistAll(false);
         }
       });
-      input.addEventListener('change', function () {
-        renderActivitiesList();
+      input.addEventListener('blur', function (e) {
+        const currentRoutine = getActiveRoutine();
+        const idx = parseInt(e.target.getAttribute('data-index'), 10);
+        if (currentRoutine && currentRoutine.activities[idx]) {
+          const parsed = parseInt(e.target.value, 10);
+          const safeVal = (!isNaN(parsed) && parsed >= 1) ? parsed : (currentRoutine.activities[idx].sets || 1);
+          currentRoutine.activities[idx].sets = safeVal;
+          e.target.value = String(safeVal);
+          updateActivityCardInPlace(idx);
+          persistAll(false);
+        }
       });
     });
 
     container.querySelectorAll('.input-activity-time').forEach(function (input) {
       input.addEventListener('input', function (e) {
+        const currentRoutine = getActiveRoutine();
         const idx = parseInt(e.target.getAttribute('data-index'), 10);
-        const val = Math.max(1, parseInt(e.target.value, 10) || 1);
-        if (routine.activities[idx]) {
-          routine.activities[idx].timePerSet = val;
+        const parsed = parseInt(e.target.value, 10);
+        if (currentRoutine && currentRoutine.activities[idx] && !isNaN(parsed) && parsed >= 1) {
+          currentRoutine.activities[idx].timePerSet = parsed;
+          updateActivityCardInPlace(idx);
           persistAll(false);
         }
       });
-      input.addEventListener('change', function () {
-        renderActivitiesList();
+      input.addEventListener('blur', function (e) {
+        const currentRoutine = getActiveRoutine();
+        const idx = parseInt(e.target.getAttribute('data-index'), 10);
+        if (currentRoutine && currentRoutine.activities[idx]) {
+          const parsed = parseInt(e.target.value, 10);
+          const safeVal = (!isNaN(parsed) && parsed >= 1) ? parsed : (currentRoutine.activities[idx].timePerSet || 30);
+          currentRoutine.activities[idx].timePerSet = safeVal;
+          e.target.value = String(safeVal);
+          updateActivityCardInPlace(idx);
+          persistAll(false);
+        }
       });
     });
 
     container.querySelectorAll('.input-activity-rest').forEach(function (input) {
       input.addEventListener('input', function (e) {
+        const currentRoutine = getActiveRoutine();
         const idx = parseInt(e.target.getAttribute('data-index'), 10);
-        const raw = parseInt(e.target.value, 10);
-        const val = isNaN(raw) ? 0 : Math.max(0, raw);
-        if (routine.activities[idx]) {
-          routine.activities[idx].restBetweenSets = val;
+        const parsed = parseInt(e.target.value, 10);
+        if (currentRoutine && currentRoutine.activities[idx] && !isNaN(parsed) && parsed >= 0) {
+          currentRoutine.activities[idx].restBetweenSets = parsed;
+          updateActivityCardInPlace(idx);
           persistAll(false);
         }
       });
-      input.addEventListener('change', function () {
-        renderActivitiesList();
+      input.addEventListener('blur', function (e) {
+        const currentRoutine = getActiveRoutine();
+        const idx = parseInt(e.target.getAttribute('data-index'), 10);
+        if (currentRoutine && currentRoutine.activities[idx]) {
+          const parsed = parseInt(e.target.value, 10);
+          const safeVal = (!isNaN(parsed) && parsed >= 0) ? parsed : (currentRoutine.activities[idx].restBetweenSets !== undefined ? currentRoutine.activities[idx].restBetweenSets : 15);
+          currentRoutine.activities[idx].restBetweenSets = safeVal;
+          e.target.value = String(safeVal);
+          updateActivityCardInPlace(idx);
+          persistAll(false);
+        }
       });
     });
 
     container.querySelectorAll('.input-between-activity-rest-item').forEach(function (input) {
       input.addEventListener('input', function (e) {
+        const currentRoutine = getActiveRoutine();
         const idx = parseInt(e.target.getAttribute('data-index'), 10);
-        const raw = parseInt(e.target.value, 10);
-        const val = isNaN(raw) ? 0 : Math.max(0, raw);
-        if (routine.activities[idx]) {
-          routine.activities[idx].restAfterActivity = val;
+        const parsed = parseInt(e.target.value, 10);
+        if (currentRoutine && currentRoutine.activities[idx] && !isNaN(parsed) && parsed >= 0) {
+          currentRoutine.activities[idx].restAfterActivity = parsed;
+          persistAll(false);
+        }
+      });
+      input.addEventListener('blur', function (e) {
+        const currentRoutine = getActiveRoutine();
+        const idx = parseInt(e.target.getAttribute('data-index'), 10);
+        if (currentRoutine && currentRoutine.activities[idx]) {
+          const parsed = parseInt(e.target.value, 10);
+          const safeVal = (!isNaN(parsed) && parsed >= 0)
+            ? parsed
+            : (currentRoutine.activities[idx].restAfterActivity !== undefined ? currentRoutine.activities[idx].restAfterActivity : currentRoutine.betweenActivityRest);
+          currentRoutine.activities[idx].restAfterActivity = safeVal;
+          e.target.value = String(safeVal);
           persistAll(false);
         }
       });
@@ -287,8 +390,9 @@
 
     container.querySelectorAll('.btn-move-down').forEach(function (btn) {
       btn.addEventListener('click', function () {
+        const currentRoutine = getActiveRoutine();
         const idx = parseInt(btn.getAttribute('data-index'), 10);
-        if (idx < routine.activities.length - 1) {
+        if (currentRoutine && idx < currentRoutine.activities.length - 1) {
           reorderActivities(idx, idx + 1);
         }
       });
@@ -296,8 +400,10 @@
 
     container.querySelectorAll('.btn-duplicate-activity').forEach(function (btn) {
       btn.addEventListener('click', function () {
+        const currentRoutine = getActiveRoutine();
+        if (!currentRoutine) return;
         const idx = parseInt(btn.getAttribute('data-index'), 10);
-        const src = routine.activities[idx];
+        const src = currentRoutine.activities[idx];
         if (!src) return;
         const copy = global.SetTimerStorage.sanitizeActivity({
           id: global.SetTimerStorage.generateId('act'),
@@ -306,8 +412,8 @@
           timePerSet: src.timePerSet,
           restBetweenSets: src.restBetweenSets,
           restAfterActivity: src.restAfterActivity
-        }, routine.betweenActivityRest);
-        routine.activities.splice(idx + 1, 0, copy);
+        }, currentRoutine.betweenActivityRest);
+        currentRoutine.activities.splice(idx + 1, 0, copy);
         persistAll(true, 'Duplicated "' + src.name + '".');
         renderActivitiesList();
       });
@@ -315,8 +421,10 @@
 
     container.querySelectorAll('.btn-remove-activity').forEach(function (btn) {
       btn.addEventListener('click', function () {
+        const currentRoutine = getActiveRoutine();
+        if (!currentRoutine) return;
         const idx = parseInt(btn.getAttribute('data-index'), 10);
-        const removed = routine.activities.splice(idx, 1)[0];
+        const removed = currentRoutine.activities.splice(idx, 1)[0];
         persistAll(true, 'Removed activity "' + (removed ? removed.name : '') + '".');
         renderActivitiesList();
       });
@@ -361,9 +469,6 @@
       'run-state-paused'
     );
 
-    // Requirement: "When paused, the screen still shows the status of what activity
-    // is running and the count down, but a text PAUSED is shown, and the screen becomes grey.
-    // The screen color returns to its state color when user Resumes"
     if (snapshot.isPaused) {
       runSectionEl.classList.add('run-state-paused');
       return;
@@ -406,7 +511,6 @@
       routineTitleEl.textContent = routine.name;
     }
 
-    // Show/hide PAUSED banner
     if (pausedBannerEl) {
       if (snapshot.isPaused) {
         pausedBannerEl.classList.remove('hidden');
@@ -415,7 +519,6 @@
       }
     }
 
-    // Update Pause / Resume button label
     if (pauseBtnEl && pauseBtnTextEl) {
       if (snapshot.isPaused) {
         pauseBtnTextEl.textContent = 'Resume';
@@ -426,7 +529,6 @@
       }
     }
 
-    // Handle END state (Bright Red screen showing END)
     if (snapshot.isFinished || snapshot.phase === global.SetTimerEngine.PHASE_END) {
       if (phaseBadgeEl) phaseBadgeEl.textContent = 'ROUTINE COMPLETE';
       if (mainHeadingEl) mainHeadingEl.textContent = 'END';
@@ -493,7 +595,6 @@
         upNextTextEl.textContent = 'Up Next: ' + step.upNextHint;
       }
     } else if (step.phase === global.SetTimerEngine.PHASE_BETWEEN) {
-      // Requirement: "In between Activities, it shows yellow screen, a count down and what is Up Next."
       if (phaseBadgeEl) {
         phaseBadgeEl.textContent = snapshot.isPaused ? 'BETWEEN ACTIVITIES (PAUSED)' : 'REST BETWEEN ACTIVITIES';
       }
@@ -510,14 +611,61 @@
     }
   }
 
+  function syncInputsToStateBeforeRun() {
+    const routine = getActiveRoutine();
+    if (!routine) return;
+
+    const nameInput = document.getElementById('routine-name-input');
+    if (nameInput && String(nameInput.value || '').trim()) {
+      routine.name = String(nameInput.value).trim();
+    }
+
+    const betweenInput = document.getElementById('between-activity-rest-input');
+    if (betweenInput) {
+      const parsedBetween = parseInt(betweenInput.value, 10);
+      if (!isNaN(parsedBetween) && parsedBetween >= 0) {
+        routine.betweenActivityRest = parsedBetween;
+      }
+    }
+
+    const container = document.getElementById('activities-list-container');
+    if (container) {
+      container.querySelectorAll('.activity-card[data-activity-index]').forEach(function (card) {
+        const idx = parseInt(card.getAttribute('data-activity-index'), 10);
+        const act = routine.activities[idx];
+        if (!act) return;
+        const nameEl = card.querySelector('.input-activity-name');
+        const setsEl = card.querySelector('.input-activity-sets');
+        const timeEl = card.querySelector('.input-activity-time');
+        const restEl = card.querySelector('.input-activity-rest');
+
+        if (nameEl) act.name = String(nameEl.value || '').trim() || ('Exercise ' + (idx + 1));
+        if (setsEl) act.sets = Math.max(1, parseInt(setsEl.value, 10) || 1);
+        if (timeEl) act.timePerSet = Math.max(1, parseInt(timeEl.value, 10) || 1);
+        if (restEl) {
+          const r = parseInt(restEl.value, 10);
+          act.restBetweenSets = (!isNaN(r) && r >= 0) ? r : 0;
+        }
+      });
+
+      container.querySelectorAll('.input-between-activity-rest-item').forEach(function (el) {
+        const idx = parseInt(el.getAttribute('data-index'), 10);
+        const act = routine.activities[idx];
+        if (!act) return;
+        const r = parseInt(el.value, 10);
+        act.restAfterActivity = (!isNaN(r) && r >= 0) ? r : routine.betweenActivityRest;
+      });
+    }
+  }
+
   function startRoutineRun() {
+    syncInputsToStateBeforeRun();
     const routine = getActiveRoutine();
     if (!routine || !Array.isArray(routine.activities) || routine.activities.length === 0) {
       showToast('Please add at least one Activity before starting the timer.', true);
       return;
     }
 
-    // Ensure any current edits are saved locally before running
     persistAll(false);
 
     const editScreen = document.getElementById('edit-mode-screen');
@@ -537,21 +685,17 @@
   }
 
   function initApp() {
-    // 1. Auto-load saved routines from localStorage on page open
     routines = global.SetTimerStorage.loadRoutines();
     activeRoutineId = global.SetTimerStorage.loadActiveRoutineId(routines);
 
-    // 2. Initialize Timer Controller
     timerController = global.SetTimerEngine.createTimerController({
       onTick: renderRunScreen,
       onPhaseChange: renderRunScreen
     });
 
-    // 3. Render Edit Mode
     renderAllEditMode();
     updateStorageBadge();
 
-    // 4. Bind Edit Mode Header Controls
     const routineSelector = document.getElementById('routine-selector');
     if (routineSelector) {
       routineSelector.addEventListener('change', function (e) {
@@ -571,8 +715,13 @@
         routine.updatedAt = new Date().toISOString();
         persistAll(false);
       });
-      routineNameInput.addEventListener('change', function () {
-        renderRoutineSelector();
+      routineNameInput.addEventListener('blur', function (e) {
+        const routine = getActiveRoutine();
+        if (!routine) return;
+        const trimmed = String(e.target.value || '').trim() || 'Untitled Routine';
+        routine.name = trimmed;
+        e.target.value = trimmed;
+        persistAll(false);
       });
     }
 
@@ -582,14 +731,30 @@
         const routine = getActiveRoutine();
         if (!routine) return;
         const raw = parseInt(e.target.value, 10);
-        const val = isNaN(raw) ? 0 : Math.max(0, raw);
-        routine.betweenActivityRest = val;
-        // Also sync all activities in this routine to the updated default between-activity rest
+        if (isNaN(raw) || raw < 0) return;
+        routine.betweenActivityRest = raw;
         routine.activities.forEach(function (act) {
-          act.restAfterActivity = val;
+          act.restAfterActivity = raw;
         });
+        // Update connector inputs in-place without destroying DOM focus
+        const container = document.getElementById('activities-list-container');
+        if (container) {
+          container.querySelectorAll('.input-between-activity-rest-item').forEach(function (el) {
+            if (document.activeElement !== el) {
+              el.value = String(raw);
+            }
+          });
+        }
         persistAll(false);
-        renderActivitiesList();
+      });
+      betweenRestInput.addEventListener('blur', function (e) {
+        const routine = getActiveRoutine();
+        if (!routine) return;
+        const raw = parseInt(e.target.value, 10);
+        const safeVal = (!isNaN(raw) && raw >= 0) ? raw : (routine.betweenActivityRest || 0);
+        routine.betweenActivityRest = safeVal;
+        e.target.value = String(safeVal);
+        persistAll(false);
       });
     }
 
@@ -631,6 +796,7 @@
     const btnSaveRoutine = document.getElementById('btn-save-routine');
     if (btnSaveRoutine) {
       btnSaveRoutine.addEventListener('click', function () {
+        syncInputsToStateBeforeRun();
         persistAll(true, 'Routine "' + (getActiveRoutine() ? getActiveRoutine().name : '') + '" saved to local storage!');
       });
     }
@@ -649,11 +815,11 @@
       });
     }
 
-    // 5. Excel Backup & Restore Controls
     const btnExportExcel = document.getElementById('btn-export-excel');
     if (btnExportExcel) {
       btnExportExcel.addEventListener('click', function () {
         try {
+          syncInputsToStateBeforeRun();
           persistAll(false);
           const res = global.SetTimerExcel.exportToExcel(routines, 'SetTimer_Backup');
           showToast('Exported ' + routines.length + ' routine(s) to ' + res.filename);
@@ -687,7 +853,6 @@
       });
     }
 
-    // 6. Start Routine & Run Mode Controls
     const btnStartRoutine = document.getElementById('btn-start-routine');
     if (btnStartRoutine) {
       btnStartRoutine.addEventListener('click', startRoutineRun);
@@ -745,7 +910,6 @@
       });
     }
 
-    // Keyboard shortcut in Run Mode: Space to Pause/Resume, Escape to exit
     document.addEventListener('keydown', function (e) {
       const runScreen = document.getElementById('run-mode-screen');
       if (!runScreen || runScreen.classList.contains('hidden')) return;

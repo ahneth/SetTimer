@@ -7,13 +7,11 @@
 (function (global) {
   'use strict';
 
-  // Phase Constants
   const PHASE_ACTIVITY = 'ACTIVITY';         // Bright Green screen
   const PHASE_SET_REST = 'SET_REST';         // Bright Orange screen
   const PHASE_BETWEEN = 'BETWEEN_ACTIVITY';  // Yellow screen with Up Next
   const PHASE_END = 'END';                   // Bright Red screen with END
 
-  // Synthesized Web Audio sound effects (no external audio files required)
   let audioCtx = null;
   let soundMuted = false;
 
@@ -68,17 +66,6 @@
     }
   }
 
-  /**
-   * Builds a flat sequence of execution steps from a Routine object:
-   * - For each Activity (1..M):
-   *   - For each Set (1..N):
-   *     1. ACTIVITY step (Green): duration = timePerSet
-   *     2. If Set < N and restBetweenSets > 0:
-   *        SET_REST step (Orange): duration = restBetweenSets
-   *   - If Activity < M and restBetweenActivities > 0:
-   *     BETWEEN_ACTIVITY step (Yellow): duration = restAfterActivity (or routine.betweenActivityRest),
-   *     includes upNextActivityName and upNextDetails
-   */
   function buildTimeline(routine) {
     const steps = [];
     if (!routine || !Array.isArray(routine.activities)) {
@@ -86,12 +73,13 @@
     }
 
     const validActivities = routine.activities.filter(function (a) {
-      return a && String(a.name || '').trim().length > 0 && (parseInt(a.sets, 10) || 0) > 0 && (parseInt(a.timePerSet, 10) || 0) > 0;
+      return a && (parseInt(a.sets, 10) || 0) > 0 && (parseInt(a.timePerSet, 10) || 0) > 0;
     });
 
     const totalActivities = validActivities.length;
 
     validActivities.forEach(function (act, actIdx) {
+      const actName = String(act.name || '').trim() || ('Exercise #' + (actIdx + 1));
       const sets = Math.max(1, parseInt(act.sets, 10) || 1);
       const timePerSet = Math.max(1, parseInt(act.timePerSet, 10) || 30);
       const restBetweenSets = Math.max(0, parseInt(act.restBetweenSets !== undefined ? act.restBetweenSets : 15, 10));
@@ -100,18 +88,18 @@
         : Math.max(0, parseInt(routine.betweenActivityRest !== undefined ? routine.betweenActivityRest : 20, 10));
 
       const nextActivity = (actIdx + 1 < totalActivities) ? validActivities[actIdx + 1] : null;
+      const nextActivityName = nextActivity ? (String(nextActivity.name || '').trim() || ('Exercise #' + (actIdx + 2))) : null;
 
       for (let s = 1; s <= sets; s++) {
-        // 1. Activity Active Set (Bright Green)
         let nextLabelAfterSet = 'Routine Complete';
         if (s < sets) {
           nextLabelAfterSet = restBetweenSets > 0
-            ? ('Rest (' + restBetweenSets + 's) → ' + act.name + ' (Set ' + (s + 1) + '/' + sets + ')')
-            : (act.name + ' (Set ' + (s + 1) + '/' + sets + ')');
-        } else if (nextActivity) {
+            ? ('Rest (' + restBetweenSets + 's) → ' + actName + ' (Set ' + (s + 1) + '/' + sets + ')')
+            : (actName + ' (Set ' + (s + 1) + '/' + sets + ')');
+        } else if (nextActivityName) {
           nextLabelAfterSet = betweenRest > 0
-            ? ('Between Activities Rest (' + betweenRest + 's) → ' + nextActivity.name)
-            : nextActivity.name;
+            ? ('Between Activities Rest (' + betweenRest + 's) → ' + nextActivityName)
+            : nextActivityName;
         }
 
         steps.push({
@@ -119,31 +107,29 @@
           duration: timePerSet,
           activityIndex: actIdx + 1,
           totalActivities: totalActivities,
-          activityName: act.name,
+          activityName: actName,
           currentSet: s,
           totalSets: sets,
-          upNextName: nextActivity ? nextActivity.name : null,
+          upNextName: nextActivityName,
           upNextHint: nextLabelAfterSet
         });
 
-        // 2. Rest in between Sets (Bright Orange)
         if (s < sets && restBetweenSets > 0) {
           steps.push({
             phase: PHASE_SET_REST,
             duration: restBetweenSets,
             activityIndex: actIdx + 1,
             totalActivities: totalActivities,
-            activityName: act.name,
+            activityName: actName,
             currentSet: s,
             nextSet: s + 1,
             totalSets: sets,
-            upNextName: act.name + ' — Set ' + (s + 1) + ' of ' + sets,
-            upNextHint: act.name + ' (Set ' + (s + 1) + ' of ' + sets + ' • ' + timePerSet + 's)'
+            upNextName: actName + ' — Set ' + (s + 1) + ' of ' + sets,
+            upNextHint: actName + ' (Set ' + (s + 1) + ' of ' + sets + ' • ' + timePerSet + 's)'
           });
         }
       }
 
-      // 3. In between Activities Rest (Yellow Screen + Up Next)
       if (nextActivity && betweenRest > 0) {
         const nextSets = Math.max(1, parseInt(nextActivity.sets, 10) || 1);
         const nextTime = Math.max(1, parseInt(nextActivity.timePerSet, 10) || 30);
@@ -153,12 +139,12 @@
           activityIndex: actIdx + 1,
           totalActivities: totalActivities,
           activityName: 'Rest Between Activities',
-          completedActivityName: act.name,
+          completedActivityName: actName,
           currentSet: sets,
           totalSets: sets,
-          upNextName: nextActivity.name,
+          upNextName: nextActivityName,
           upNextDetails: nextSets + (nextSets === 1 ? ' Set' : ' Sets') + ' × ' + nextTime + 's',
-          upNextHint: nextActivity.name + ' (' + nextSets + ' × ' + nextTime + 's)'
+          upNextHint: nextActivityName + ' (' + nextSets + ' × ' + nextTime + 's)'
         });
       }
     });
@@ -319,7 +305,6 @@
 
     function pause() {
       if (!isRunning || isPaused || isFinished) return;
-      // Record exact elapsed time up to the pause moment
       if (lastTickTimestamp) {
         const elapsed = performance.now() - lastTickTimestamp;
         remainingMs = Math.max(0, remainingMs - elapsed);
@@ -366,7 +351,6 @@
         intervalId = setInterval(tick, 80);
         return;
       }
-      // If more than 2 seconds into current step, restart current step; else go to previous step
       if (stepDurationMs - remainingMs > 2000 || currentStepIndex === 0) {
         loadStep(currentStepIndex);
       } else {
