@@ -4,6 +4,20 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>SetTimer — Exercise Routine Interval Timer</title>
+  <!-- App Icons & Web App Manifest for Android Home Screen Shortcut & PC Bookmarks -->
+  <meta name="theme-color" content="#0f172a" />
+  <meta name="application-name" content="SetTimer" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="SetTimer" />
+  <link rel="icon" type="image/x-icon" href="favicon.ico" />
+  <link rel="shortcut icon" type="image/x-icon" href="favicon.ico" />
+  <link rel="icon" type="image/png" sizes="64x64" href="favicon.png" />
+  <link rel="icon" type="image/png" sizes="192x192" href="icon-192.png" />
+  <link rel="icon" type="image/png" sizes="512x512" href="icon-512.png" />
+  <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png" />
+  <link rel="manifest" href="manifest.json" />
   <!-- Tailwind CSS & Google Fonts -->
   <script src="https://cdn.tailwindcss.com/3.4.17"></script>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -24,11 +38,11 @@
     <!-- Top Header & Brand Bar -->
     <header class="flex flex-col md:flex-row md:items-center md:justify-between gap-4 pb-6 border-b border-slate-800">
       <div class="flex items-center gap-3.5">
-        <div class="w-12 h-12 rounded-2xl bg-emerald-500/20 border border-emerald-500/40 flex items-center justify-center text-emerald-400 shadow-lg shadow-emerald-950/50">
-          <svg class="w-7 h-7" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-          </svg>
-        </div>
+        <img
+          src="icon-192.png"
+          alt="SetTimer App Icon"
+          class="w-12 h-12 rounded-2xl shadow-lg shadow-emerald-950/60 border border-slate-700/80 object-cover shrink-0"
+        />
         <div>
           <div class="flex items-center gap-2.5">
             <h1 class="text-2xl sm:text-3xl font-extrabold tracking-tight text-white">SetTimer</h1>
