@@ -1,0 +1,176 @@
+/* ==========================================================================
+   SetTimer - Stylesheet Module (styles.css)
+   Compartmentalized styling for Edit Mode, Drag & Drop, and Full-Screen Run Mode
+   ========================================================================== */
+
+:root {
+  --bg-page: #0f172a;
+  --bg-card: #1e293b;
+  --bg-card-hover: #26354d;
+  --bg-input: #0f172a;
+  --border-color: #334155;
+  --text-primary: #f8fafc;
+  --text-secondary: #94a3b8;
+  --accent-primary: #10b981;
+  --accent-primary-hover: #059669;
+  --accent-blue: #3b82f6;
+  --accent-amber: #f59e0b;
+  --accent-danger: #ef4444;
+
+  /* Run Mode State Colors (Vibrant Full-Screen) */
+  --state-activity-bg: #00c853;       /* Bright Green */
+  --state-activity-text: #ffffff;
+  --state-set-rest-bg: #ff6d00;       /* Bright Orange */
+  --state-set-rest-text: #ffffff;
+  --state-between-bg: #ffd600;        /* Bright Yellow */
+  --state-between-text: #0f172a;
+  --state-end-bg: #d50000;            /* Bright Red */
+  --state-end-text: #ffffff;
+  --state-paused-bg: #52525b;         /* Grey when Paused */
+  --state-paused-text: #ffffff;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  background-color: var(--bg-page);
+  color: var(--text-primary);
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+
+/* Smooth transitions for background colors in Run Mode */
+.run-screen-transition {
+  transition: background-color 0.25s ease, color 0.25s ease;
+}
+
+/* ==========================================================================
+   Run Mode Full-Screen State Classes
+   ========================================================================== */
+.run-state-activity {
+  background-color: var(--state-activity-bg) !important;
+  color: var(--state-activity-text) !important;
+}
+
+.run-state-set-rest {
+  background-color: var(--state-set-rest-bg) !important;
+  color: var(--state-set-rest-text) !important;
+}
+
+.run-state-between {
+  background-color: var(--state-between-bg) !important;
+  color: var(--state-between-text) !important;
+}
+
+.run-state-end {
+  background-color: var(--state-end-bg) !important;
+  color: var(--state-end-text) !important;
+}
+
+.run-state-paused {
+  background-color: var(--state-paused-bg) !important;
+  color: var(--state-paused-text) !important;
+}
+
+/* ==========================================================================
+   Timer Display Typography
+   ========================================================================== */
+.timer-digits {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+  letter-spacing: -0.03em;
+  line-height: 1;
+  text-shadow: 0 4px 24px rgba(0, 0, 0, 0.18);
+}
+
+.run-state-between .timer-digits {
+  text-shadow: 0 2px 12px rgba(255, 255, 255, 0.25);
+}
+
+/* ==========================================================================
+   Drag and Drop Styles
+   ========================================================================== */
+.activity-card {
+  transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease, opacity 0.15s ease;
+}
+
+.activity-card.dragging {
+  opacity: 0.45;
+  transform: scale(0.99);
+  border-color: var(--accent-blue) !important;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.45);
+}
+
+.activity-card.drag-over-top {
+  border-top: 3px solid #10b981 !important;
+}
+
+.activity-card.drag-over-bottom {
+  border-bottom: 3px solid #10b981 !important;
+}
+
+.drag-handle {
+  cursor: grab;
+  user-select: none;
+  touch-action: none;
+}
+
+.drag-handle:active {
+  cursor: grabbing;
+}
+
+/* ==========================================================================
+   Custom Form Inputs & Scrollbar
+   ========================================================================== */
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button {
+  opacity: 1;
+}
+
+.field-input {
+  background-color: var(--bg-input);
+  border: 1px solid var(--border-color);
+  color: var(--text-primary);
+  border-radius: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  font-size: 0.925rem;
+  width: 100%;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.field-input:focus {
+  outline: none;
+  border-color: var(--accent-primary);
+  box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.2);
+}
+
+/* Toast Notification */
+.toast-enter {
+  animation: toastSlideIn 0.25s ease forwards;
+}
+
+@keyframes toastSlideIn {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Pulse animation for PAUSED badge */
+@keyframes pulsePaused {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.82; transform: scale(0.98); }
+}
+
+.paused-banner-pulse {
+  animation: pulsePaused 1.8s infinite ease-in-out;
+}
