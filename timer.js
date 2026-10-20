@@ -1,7 +1,7 @@
 /* ==========================================================================
    SetTimer - Interval Timer Engine & Sound Module (timer.js)
    Builds the timeline of steps from a Routine configuration and drives the
-   countdown, state transitions, audio cues, Pause (grey screen) and Resume.
+   countdown, state transitions, audio cues, volume control, Pause and Resume.
    ========================================================================== */
 
 (function (global) {
@@ -14,9 +14,10 @@
 
   let audioCtx = null;
   let soundMuted = false;
+  let soundVolume = 80; // 0 to 100 percentage
 
   function ensureAudioContext() {
-    if (soundMuted) return null;
+    if (soundMuted || soundVolume <= 0) return null;
     try {
       const AudioContextClass = global.AudioContext || global.webkitAudioContext;
       if (!AudioContextClass) return null;
@@ -33,6 +34,7 @@
   }
 
   function playTone(freq, durationMs, type, gainVal) {
+    if (soundMuted || soundVolume <= 0) return;
     const ctx = ensureAudioContext();
     if (!ctx) return;
     try {
@@ -40,8 +42,13 @@
       const gain = ctx.createGain();
       osc.type = type || 'sine';
       osc.frequency.setValueAtTime(freq, ctx.currentTime);
-      gain.gain.setValueAtTime(gainVal || 0.15, ctx.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + durationMs / 1000);
+
+      const baseGain = gainVal || 0.18;
+      // Scale gain by volume slider (0-100%), with 100% allowing up to 1.5x standard gain
+      const scaledGain = Math.max(0.002, Math.min(0.6, baseGain * (soundVolume / 80)));
+
+      gain.gain.setValueAtTime(scaledGain, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.0008, ctx.currentTime + durationMs / 1000);
       osc.connect(gain);
       gain.connect(ctx.destination);
       osc.start();
@@ -52,17 +59,21 @@
   }
 
   function playCountdownTick() {
-    playTone(660, 110, 'sine', 0.12);
+    playTone(660, 110, 'sine', 0.14);
+  }
+
+  function playVolumePreviewTone() {
+    playTone(740, 90, 'sine', 0.16);
   }
 
   function playPhaseTransition(phase) {
     if (phase === PHASE_ACTIVITY) {
-      playTone(880, 260, 'triangle', 0.2);
+      playTone(880, 260, 'triangle', 0.22);
     } else if (phase === PHASE_SET_REST || phase === PHASE_BETWEEN) {
-      playTone(520, 240, 'sine', 0.18);
+      playTone(520, 240, 'sine', 0.2);
     } else if (phase === PHASE_END) {
-      playTone(587.33, 180, 'triangle', 0.2);
-      setTimeout(function () { playTone(880, 420, 'triangle', 0.22); }, 190);
+      playTone(587.33, 180, 'triangle', 0.22);
+      setTimeout(function () { playTone(880, 420, 'triangle', 0.25); }, 190);
     }
   }
 
@@ -386,7 +397,22 @@
   }
 
   function isMuted() {
-    return soundMuted;
+    return soundMuted || soundVolume <= 0;
+  }
+
+  function setVolume(volPercent) {
+    const parsed = parseInt(volPercent, 10);
+    soundVolume = isNaN(parsed) ? 80 : Math.max(0, Math.min(100, parsed));
+    if (soundVolume === 0) {
+      soundMuted = true;
+    } else {
+      soundMuted = false;
+    }
+    return soundVolume;
+  }
+
+  function getVolume() {
+    return soundMuted ? 0 : soundVolume;
   }
 
   global.SetTimerEngine = {
@@ -399,6 +425,9 @@
     formatSeconds: formatSeconds,
     createTimerController: createTimerController,
     setMuted: setMuted,
-    isMuted: isMuted
+    isMuted: isMuted,
+    setVolume: setVolume,
+    getVolume: getVolume,
+    playVolumePreviewTone: playVolumePreviewTone
   };
 })(window);

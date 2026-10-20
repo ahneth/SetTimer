@@ -1,7 +1,8 @@
 /* ==========================================================================
    SetTimer - Main Application Controller Module (app.js)
    Coordinates Edit Mode, LocalStorage sync, Drag-and-Drop reordering,
-   Excel Backup/Restore, and the Full-Screen Run Mode countdown view.
+   Excel Backup/Restore, Sound Volume Sliders, PWA Service Worker registration,
+   and the Full-Screen Run Mode countdown view.
    ========================================================================== */
 
 (function (global) {
@@ -11,6 +12,8 @@
   let activeRoutineId = null;
   let timerController = null;
   let toastTimeout = null;
+  let lastNonZeroVolume = 80;
+  let deferredInstallPrompt = null;
 
   function getActiveRoutine() {
     return routines.find(function (r) { return r.id === activeRoutineId; }) || routines[0] || null;
@@ -54,6 +57,72 @@
     const now = new Date();
     const timeStr = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
     badge.textContent = 'Auto-saved locally • ' + timeStr;
+  }
+
+  /* ==========================================================================
+     Synchronized Volume Control (Edit Mode & Run Mode Top Bars)
+     ========================================================================== */
+  function syncVolumeUI(volumePercent) {
+    const vol = Math.max(0, Math.min(100, parseInt(volumePercent, 10) || 0));
+    const isMuted = (vol === 0) || global.SetTimerEngine.isMuted();
+    const displayVol = isMuted ? 0 : vol;
+
+    const editSlider = document.getElementById('edit-volume-slider');
+    const runSlider = document.getElementById('run-volume-slider');
+    const editLabel = document.getElementById('edit-volume-label');
+    const runLabel = document.getElementById('run-volume-label');
+    const editIcon = document.getElementById('edit-sound-icon');
+    const runIcon = document.getElementById('run-sound-icon');
+    const runSoundToggleLabel = document.getElementById('sound-toggle-label');
+
+    if (editSlider && Number(editSlider.value) !== displayVol) {
+      editSlider.value = String(displayVol);
+    }
+    if (runSlider && Number(runSlider.value) !== displayVol) {
+      runSlider.value = String(displayVol);
+    }
+    if (editLabel) {
+      editLabel.textContent = displayVol + '%';
+    }
+    if (runLabel) {
+      runLabel.textContent = displayVol + '%';
+    }
+
+    const iconChar = displayVol === 0 ? '🔇' : (displayVol < 45 ? '🔉' : '🔊');
+    if (editIcon) editIcon.textContent = iconChar;
+    if (runIcon) runIcon.textContent = iconChar;
+    if (runSoundToggleLabel) {
+      runSoundToggleLabel.textContent = displayVol === 0 ? 'Muted' : 'Vol';
+    }
+  }
+
+  function applyVolumeChange(newVolumePercent, playPreview) {
+    const clamped = Math.max(0, Math.min(100, parseInt(newVolumePercent, 10) || 0));
+    if (clamped > 0) {
+      lastNonZeroVolume = clamped;
+    }
+    global.SetTimerEngine.setVolume(clamped);
+    global.SetTimerStorage.saveVolume(clamped);
+    syncVolumeUI(clamped);
+    if (playPreview && clamped > 0) {
+      global.SetTimerEngine.playVolumePreviewTone();
+    }
+  }
+
+  function toggleMuteVolume() {
+    const currentVol = global.SetTimerEngine.getVolume();
+    if (currentVol > 0 && !global.SetTimerEngine.isMuted()) {
+      lastNonZeroVolume = currentVol;
+      global.SetTimerEngine.setVolume(0);
+      global.SetTimerStorage.saveVolume(0);
+      syncVolumeUI(0);
+    } else {
+      const restored = lastNonZeroVolume > 0 ? lastNonZeroVolume : 80;
+      global.SetTimerEngine.setVolume(restored);
+      global.SetTimerStorage.saveVolume(restored);
+      syncVolumeUI(restored);
+      global.SetTimerEngine.playVolumePreviewTone();
+    }
   }
 
   function renderRoutineSelector() {
@@ -684,9 +753,59 @@
     if (editScreen) editScreen.classList.remove('hidden');
   }
 
+  function registerPwaServiceWorker() {
+    // Show helpful warning if user opened via file:// or content:// on Android
+    const protocol = global.location && global.location.protocol ? global.location.protocol : '';
+    const warningBanner = document.getElementById('local-file-pwa-warning');
+    if (protocol === 'file:' || protocol === 'content:') {
+      if (warningBanner) warningBanner.classList.remove('hidden');
+      return;
+    }
+
+    if ('serviceWorker' in navigator && (protocol === 'https:' || protocol === 'http:')) {
+      navigator.serviceWorker.register('./sw.js').catch(function (err) {
+        console.warn('SetTimer ServiceWorker registration skipped:', err);
+      });
+    }
+
+    const installBtn = document.getElementById('btn-install-pwa');
+    global.addEventListener('beforeinstallprompt', function (e) {
+      e.preventDefault();
+      deferredInstallPrompt = e;
+      if (installBtn) {
+        installBtn.classList.remove('hidden');
+      }
+    });
+
+    if (installBtn) {
+      installBtn.addEventListener('click', function () {
+        if (!deferredInstallPrompt) return;
+        deferredInstallPrompt.prompt();
+        deferredInstallPrompt.userChoice.then(function () {
+          deferredInstallPrompt = null;
+          installBtn.classList.add('hidden');
+        });
+      });
+    }
+
+    global.addEventListener('appinstalled', function () {
+      deferredInstallPrompt = null;
+      if (installBtn) installBtn.classList.add('hidden');
+      showToast('SetTimer installed as an App!');
+    });
+  }
+
   function initApp() {
     routines = global.SetTimerStorage.loadRoutines();
     activeRoutineId = global.SetTimerStorage.loadActiveRoutineId(routines);
+
+    // Initialize saved sound volume (0 - 100%)
+    const savedVol = global.SetTimerStorage.loadVolume();
+    if (savedVol > 0) {
+      lastNonZeroVolume = savedVol;
+    }
+    global.SetTimerEngine.setVolume(savedVol);
+    syncVolumeUI(savedVol);
 
     timerController = global.SetTimerEngine.createTimerController({
       onTick: renderRunScreen,
@@ -695,6 +814,38 @@
 
     renderAllEditMode();
     updateStorageBadge();
+    registerPwaServiceWorker();
+
+    // Edit Mode & Run Mode Volume Slide Bar Listeners
+    const editVolumeSlider = document.getElementById('edit-volume-slider');
+    if (editVolumeSlider) {
+      editVolumeSlider.addEventListener('input', function (e) {
+        applyVolumeChange(e.target.value, false);
+      });
+      editVolumeSlider.addEventListener('change', function (e) {
+        applyVolumeChange(e.target.value, true);
+      });
+    }
+
+    const runVolumeSlider = document.getElementById('run-volume-slider');
+    if (runVolumeSlider) {
+      runVolumeSlider.addEventListener('input', function (e) {
+        applyVolumeChange(e.target.value, false);
+      });
+      runVolumeSlider.addEventListener('change', function (e) {
+        applyVolumeChange(e.target.value, true);
+      });
+    }
+
+    const btnEditSoundToggle = document.getElementById('btn-edit-sound-toggle');
+    if (btnEditSoundToggle) {
+      btnEditSoundToggle.addEventListener('click', toggleMuteVolume);
+    }
+
+    const btnSoundToggle = document.getElementById('btn-sound-toggle');
+    if (btnSoundToggle) {
+      btnSoundToggle.addEventListener('click', toggleMuteVolume);
+    }
 
     const routineSelector = document.getElementById('routine-selector');
     if (routineSelector) {
@@ -897,17 +1048,6 @@
     const btnEndBackEdit = document.getElementById('btn-end-back-edit');
     if (btnEndBackEdit) {
       btnEndBackEdit.addEventListener('click', exitRunMode);
-    }
-
-    const btnSoundToggle = document.getElementById('btn-sound-toggle');
-    const soundLabelEl = document.getElementById('sound-toggle-label');
-    if (btnSoundToggle) {
-      btnSoundToggle.addEventListener('click', function () {
-        const muted = global.SetTimerEngine.setMuted(!global.SetTimerEngine.isMuted());
-        if (soundLabelEl) {
-          soundLabelEl.textContent = muted ? 'Sound: Off' : 'Sound: On';
-        }
-      });
     }
 
     document.addEventListener('keydown', function (e) {

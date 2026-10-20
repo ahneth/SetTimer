@@ -1,6 +1,6 @@
 /* ==========================================================================
    SetTimer - Local Storage Module (storage.js)
-   Handles saving, auto-loading, creating, and updating routines in localStorage
+   Handles saving, auto-loading, creating, and updating routines & volume in localStorage
    ========================================================================== */
 
 (function (global) {
@@ -8,6 +8,7 @@
 
   const ROUTINES_STORAGE_KEY = 'settimer_routines_v1';
   const ACTIVE_ROUTINE_KEY = 'settimer_active_routine_id_v1';
+  const VOLUME_STORAGE_KEY = 'settimer_volume_v1';
 
   function generateId(prefix) {
     return (prefix || 'id') + '_' + Date.now().toString(36) + '_' + Math.random().toString(36).substring(2, 7);
@@ -170,6 +171,31 @@
     }
   }
 
+  function loadVolume() {
+    try {
+      const raw = localStorage.getItem(VOLUME_STORAGE_KEY);
+      if (raw === null || raw === undefined || raw === '') {
+        return 80;
+      }
+      const parsed = parseInt(raw, 10);
+      if (isNaN(parsed)) return 80;
+      return Math.max(0, Math.min(100, parsed));
+    } catch (err) {
+      return 80;
+    }
+  }
+
+  function saveVolume(volumePercent) {
+    const parsed = parseInt(volumePercent, 10);
+    const clamped = isNaN(parsed) ? 80 : Math.max(0, Math.min(100, parsed));
+    try {
+      localStorage.setItem(VOLUME_STORAGE_KEY, String(clamped));
+    } catch (err) {
+      // Ignore storage write errors
+    }
+    return clamped;
+  }
+
   function createEmptyRoutine(name) {
     return sanitizeRoutine({
       id: generateId('routine'),
@@ -207,6 +233,8 @@
     saveRoutines: saveRoutines,
     loadActiveRoutineId: loadActiveRoutineId,
     saveActiveRoutineId: saveActiveRoutineId,
+    loadVolume: loadVolume,
+    saveVolume: saveVolume,
     sanitizeRoutine: sanitizeRoutine,
     sanitizeActivity: sanitizeActivity,
     createEmptyRoutine: createEmptyRoutine,
