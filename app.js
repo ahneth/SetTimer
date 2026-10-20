@@ -763,9 +763,15 @@
     }
 
     if ('serviceWorker' in navigator && (protocol === 'https:' || protocol === 'http:')) {
-      navigator.serviceWorker.register('./sw.js').catch(function (err) {
-        console.warn('SetTimer ServiceWorker registration skipped:', err);
-      });
+      navigator.serviceWorker.register('./sw.js', { scope: './' })
+        .then(function (registration) {
+          if (registration && typeof registration.update === 'function') {
+            registration.update().catch(function () {});
+          }
+        })
+        .catch(function (err) {
+          console.warn('SetTimer ServiceWorker registration skipped:', err);
+        });
     }
 
     const installBtn = document.getElementById('btn-install-pwa');

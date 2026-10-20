@@ -5,7 +5,7 @@
    "Could not open app" launch errors.
    ========================================================================== */
 
-const CACHE_NAME = 'settimer-pwa-cache-v2';
+const CACHE_NAME = 'settimer-pwa-cache-v3';
 const ASSETS_TO_CACHE = [
   './',
   './index.html',
@@ -27,9 +27,13 @@ self.addEventListener('install', function (event) {
   self.skipWaiting();
   event.waitUntil(
     caches.open(CACHE_NAME).then(function (cache) {
-      return cache.addAll(ASSETS_TO_CACHE).catch(function () {
-        // Ignore individual asset cache failures on first load
-      });
+      return Promise.all(
+        ASSETS_TO_CACHE.map(function (assetUrl) {
+          return cache.add(assetUrl).catch(function () {
+            return null;
+          });
+        })
+      );
     })
   );
 });
@@ -54,27 +58,48 @@ self.addEventListener('activate', function (event) {
 self.addEventListener('fetch', function (event) {
   if (event.request.method !== 'GET') return;
 
-  event.respondWith(
-    caches.match(event.request).then(function (cachedResponse) {
-      const fetchPromise = fetch(event.request)
-        .then(function (networkResponse) {
-          if (networkResponse && networkResponse.status === 200 && networkResponse.type === 'basic') {
-            const responseClone = networkResponse.clone();
-            caches.open(CACHE_NAME).then(function (cache) {
-              cache.put(event.request, responseClone);
-            });
-          }
-          return networkResponse;
-        })
-        .catch(function () {
-          if (cachedResponse) return cachedResponse;
-          if (event.request.mode === 'navigate') {
-            return caches.match('./index.html') || caches.match('./');
-          }
-          return cachedResponse;
-        });
+  let requestUrl;
+  try {
+    requestUrl = new URL(event.request.url);
+  } catch (e) {
+    return;
+  }
 
-      return cachedResponse || fetchPromise;
-    })
+  // Only handle same-origin requests; let external CDNs pass through directly
+  if (requestUrl.origin !== self.location.origin) {
+    return;
+  }
+
+  event.respondWith(
+    fetch(event.request)
+      .then(function (networkResponse) {
+        if (networkResponse && networkResponse.status === 200) {
+          const responseClone = networkResponse.clone();
+          caches.open(CACHE_NAME).then(function (cache) {
+            cache.put(event.request, responseClone);
+          });
+        }
+        return networkResponse;
+      })
+      .catch(function () {
+        return caches.match(event.request, { ignoreSearch: true })
+          .then(function (cachedResponse) {
+            if (cachedResponse) return cachedResponse;
+            if (event.request.mode === 'navigate') {
+              return caches.match('./index.html', { ignoreSearch: true })
+                .then(function (indexRes) {
+                  return indexRes || caches.match('./', { ignoreSearch: true });
+                });
+            }
+            return null;
+          })
+          .then(function (fallbackResponse) {
+            return fallbackResponse || new Response('Offline', {
+              status: 503,
+              statusText: 'Offline',
+              headers: { 'Content-Type': 'text/plain; charset=utf-8' }
+            });
+          });
+      })
   );
 });
