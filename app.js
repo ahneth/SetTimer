@@ -1,8 +1,8 @@
 /* ==========================================================================
    SetTimer - Main Application Controller Module (app.js)
-   Coordinates Edit Mode, LocalStorage sync, Drag-and-Drop reordering,
-   Excel Backup/Restore, Sound Volume Sliders, PWA Service Worker registration,
-   and the Full-Screen Run Mode countdown view.
+   Coordinates 3-Level Tree Edit Mode, Prepare Time, LocalStorage sync,
+   Drag-and-Drop reordering, Excel Backup/Restore, Sound Volume Sliders,
+   PWA Service Worker registration, and the Full-Screen Run Mode view.
    ========================================================================== */
 
 (function (global) {
@@ -14,15 +14,66 @@
   let toastTimeout = null;
   let lastNonZeroVolume = 80;
   let deferredInstallPrompt = null;
+  let lastPreviewTimestamp = 0;
 
   function getActiveRoutine() {
     return routines.find(function (r) { return r.id === activeRoutineId; }) || routines[0] || null;
   }
 
   /**
-   * Saves all routines to localStorage in-place without replacing live object
-   * references or destroying focused DOM inputs.
+   * Resolves a dot-separated index path (e.g. "0", "0.1", "1.0.2") inside a routine's tree.
    */
+  function resolveNodeByPath(routine, pathStr) {
+    if (!routine || !Array.isArray(routine.activities)) return null;
+    if (pathStr === '' || pathStr === null || pathStr === undefined) {
+      return {
+        node: null,
+        parentList: routine.activities,
+        parentNode: null,
+        index: -1,
+        depth: 0
+      };
+    }
+    const parts = String(pathStr).split('.').map(function (p) { return parseInt(p, 10); });
+    let currentList = routine.activities;
+    let parentNode = null;
+    let currentNode = null;
+
+    for (let i = 0; i < parts.length; i++) {
+      const idx = parts[i];
+      if (!Array.isArray(currentList) || isNaN(idx) || idx < 0 || idx >= currentList.length) {
+        return null;
+      }
+      currentNode = currentList[idx];
+      if (i < parts.length - 1) {
+        parentNode = currentNode;
+        currentList = currentNode && Array.isArray(currentNode.children) ? currentNode.children : null;
+      } else {
+        return {
+          node: currentNode,
+          parentList: currentList,
+          parentNode: parentNode,
+          index: idx,
+          depth: parts.length
+        };
+      }
+    }
+    return null;
+  }
+
+  function getSiblingListByParentPath(routine, parentPathStr) {
+    if (!routine) return null;
+    if (!parentPathStr) return routine.activities;
+    const resolved = resolveNodeByPath(routine, parentPathStr);
+    if (resolved && resolved.node && resolved.node.type === 'group') {
+      if (!Array.isArray(resolved.node.children)) {
+        resolved.node.children = [];
+      }
+      return resolved.node.children;
+    }
+    return null;
+  }
+
   function persistAll(showFeedback, message) {
     global.SetTimerStorage.saveRoutines(routines);
     global.SetTimerStorage.saveActiveRoutineId(activeRoutineId);
@@ -105,7 +156,11 @@
     global.SetTimerStorage.saveVolume(clamped);
     syncVolumeUI(clamped);
     if (playPreview && clamped > 0) {
-      global.SetTimerEngine.playVolumePreviewTone();
+      const now = Date.now();
+      if (now - lastPreviewTimestamp >= 110) {
+        lastPreviewTimestamp = now;
+        global.SetTimerEngine.playVolumePreviewTone();
+      }
     }
   }
 
@@ -129,7 +184,6 @@
     const selectEl = document.getElementById('routine-selector');
     if (!selectEl) return;
 
-    // Update options in-place if count & IDs match so we don't disrupt an open dropdown
     const existingOptions = selectEl.querySelectorAll('option');
     const sameList = existingOptions.length === routines.length &&
       Array.from(existingOptions).every(function (opt, i) { return opt.value === routines[i].id; });
@@ -137,7 +191,7 @@
     if (sameList) {
       routines.forEach(function (routine, i) {
         const summary = global.SetTimerEngine.calculateRoutineSummary(routine);
-        existingOptions[i].textContent = routine.name + ' (' + routine.activities.length + ' activities • ' + global.SetTimerEngine.formatSeconds(summary.totalSeconds) + ')';
+        existingOptions[i].textContent = routine.name + ' (' + summary.activityCount + ' exercise runs • ' + global.SetTimerEngine.formatSeconds(summary.totalSeconds) + ')';
         existingOptions[i].selected = (routine.id === activeRoutineId);
       });
       return;
@@ -148,7 +202,7 @@
       const opt = document.createElement('option');
       opt.value = routine.id;
       const summary = global.SetTimerEngine.calculateRoutineSummary(routine);
-      opt.textContent = routine.name + ' (' + routine.activities.length + ' activities • ' + global.SetTimerEngine.formatSeconds(summary.totalSeconds) + ')';
+      opt.textContent = routine.name + ' (' + summary.activityCount + ' exercise runs • ' + global.SetTimerEngine.formatSeconds(summary.totalSeconds) + ')';
       if (routine.id === activeRoutineId) {
         opt.selected = true;
       }
@@ -161,10 +215,14 @@
     if (!routine) return;
 
     const nameInput = document.getElementById('routine-name-input');
+    const prepInput = document.getElementById('prepare-time-input');
     const betweenRestInput = document.getElementById('between-activity-rest-input');
 
     if (nameInput && document.activeElement !== nameInput) {
       nameInput.value = routine.name;
+    }
+    if (prepInput && document.activeElement !== prepInput) {
+      prepInput.value = routine.prepareTime !== undefined ? routine.prepareTime : 15;
     }
     if (betweenRestInput && document.activeElement !== betweenRestInput) {
       betweenRestInput.value = routine.betweenActivityRest;
@@ -190,33 +248,33 @@
   }
 
   /**
-   * Updates an individual Activity card's subtotal badge and connector label
-   * in-place without re-rendering container.innerHTML (preserving input focus).
+   * Refresh all visible node subtotal badges and connector labels in-place
+   * without destroying DOM focus when the user types in an input field.
    */
-  function updateActivityCardInPlace(idx) {
+  function refreshAllNodeSubtotalsInPlace() {
     const routine = getActiveRoutine();
-    if (!routine || !routine.activities[idx]) return;
-
-    const act = routine.activities[idx];
-    const actTotalWork = (Math.max(1, parseInt(act.sets, 10) || 1)) * (Math.max(1, parseInt(act.timePerSet, 10) || 1));
-    const actTotalSetRest = Math.max(0, (Math.max(1, parseInt(act.sets, 10) || 1) - 1)) * Math.max(0, parseInt(act.restBetweenSets, 10) || 0);
-    const actSubtotalSec = actTotalWork + actTotalSetRest;
-
     const container = document.getElementById('activities-list-container');
-    if (!container) return;
+    if (!routine || !container) return;
 
-    const subtotalEl = container.querySelector('[data-subtotal-index="' + idx + '"]');
-    if (subtotalEl) {
-      subtotalEl.textContent = 'Subtotal: ' + global.SetTimerEngine.formatSeconds(actSubtotalSec);
-    }
-
-    // If this activity's name changed and there is a preceding connector bar, update its "before <Name>" label
-    if (idx > 0) {
-      const prevConnectorNameEl = container.querySelector('[data-next-activity-name-for="' + (idx - 1) + '"]');
-      if (prevConnectorNameEl) {
-        prevConnectorNameEl.textContent = act.name || ('Exercise #' + (idx + 1));
+    container.querySelectorAll('[data-subtotal-path]').forEach(function (el) {
+      const p = el.getAttribute('data-subtotal-path');
+      const resolved = resolveNodeByPath(routine, p);
+      if (resolved && resolved.node) {
+        const sec = global.SetTimerEngine.calculateNodeSubtotalSeconds(resolved.node, routine.betweenActivityRest);
+        el.textContent = 'Subtotal: ' + global.SetTimerEngine.formatSeconds(sec);
       }
-    }
+    });
+
+    container.querySelectorAll('[data-next-node-name-for]').forEach(function (el) {
+      const p = el.getAttribute('data-next-node-name-for');
+      const resolved = resolveNodeByPath(routine, p);
+      if (resolved && resolved.parentList && resolved.index + 1 < resolved.parentList.length) {
+        const nextNode = resolved.parentList[resolved.index + 1];
+        if (nextNode) {
+          el.textContent = nextNode.name || (nextNode.type === 'group' ? 'Next Group' : 'Next Exercise');
+        }
+      }
+    });
   }
 
   function escapeHtml(str) {
@@ -225,6 +283,207 @@
       .replace(/</g, '&lt;')
       .replace(/>/g, '&gt;')
       .replace(/"/g, '&quot;');
+  }
+
+  /**
+   * Recursively renders the 3-level Exercise & Group tree.
+   * Level 1: Root (Exercises & Groups)
+   * Level 2: Inside a Group (Exercises & Subgroups)
+   * Level 3: Inside a Subgroup (Exercises only; max depth = 3)
+   */
+  function renderTreeNodesHtml(nodes, parentPath, depth, routine) {
+    const list = Array.isArray(nodes) ? nodes : [];
+    const total = list.length;
+    const htmlParts = [];
+
+    list.forEach(function (node, idx) {
+      const isLast = (idx === total - 1);
+      const pathStr = parentPath ? (parentPath + '.' + idx) : String(idx);
+      const subtotalSec = global.SetTimerEngine.calculateNodeSubtotalSeconds(node, routine.betweenActivityRest);
+      const betweenRestVal = node.restAfterActivity !== undefined ? node.restAfterActivity : routine.betweenActivityRest;
+      const isGroup = (node.type === 'group');
+
+      // Can this node be moved into an adjacent sibling group? (Respects 3-level limit)
+      let canIndentIntoSiblingGroup = false;
+      const nodeHeight = global.SetTimerStorage.getSubtreeHeight(node);
+      if (idx > 0 && list[idx - 1] && list[idx - 1].type === 'group') {
+        if (depth + nodeHeight <= global.SetTimerStorage.MAX_TREE_DEPTH) {
+          canIndentIntoSiblingGroup = true;
+        }
+      }
+      const canOutdentToParent = (depth > 1);
+
+      if (isGroup) {
+        const isSubgroup = (depth >= 2);
+        const canAddNestedGroup = (depth < global.SetTimerStorage.MAX_TREE_DEPTH - 1); // Only Level 1 Groups can add Level 2 Subgroups
+        const borderTheme = isSubgroup
+          ? 'bg-purple-950/25 border-purple-500/45 hover:border-purple-400/60'
+          : 'bg-indigo-950/25 border-indigo-500/45 hover:border-indigo-400/60';
+        const badgeTheme = isSubgroup
+          ? 'bg-purple-500/20 text-purple-200 border-purple-400/40'
+          : 'bg-indigo-500/20 text-indigo-200 border-indigo-400/40';
+        const groupLabel = isSubgroup ? ('Subgroup #' + (idx + 1) + ' (Level ' + depth + ')') : ('Group #' + (idx + 1) + ' (Level ' + depth + ')');
+        const childList = Array.isArray(node.children) ? node.children : [];
+
+        htmlParts.push(
+          '<div class="activity-card group-card border-2 rounded-2xl p-4 sm:p-5 shadow-md ' + borderTheme + '" data-node-path="' + pathStr + '" data-activity-id="' + escapeHtml(node.id) + '" draggable="false">' +
+            '<div class="flex flex-wrap items-center justify-between gap-2 mb-3 pb-2.5 border-b border-slate-700/70">' +
+              '<div class="flex flex-wrap items-center gap-2">' +
+                '<span class="drag-handle inline-flex items-center justify-center w-8 h-8 rounded-lg bg-slate-900/90 border border-slate-700 text-slate-400 hover:text-white hover:border-slate-500" title="Drag to reorder">' +
+                  '<svg class="w-4 h-4 pointer-events-none" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8h16M4 16h16"/></svg>' +
+                '</span>' +
+                '<button type="button" class="btn-toggle-collapse inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-slate-900/80 border border-slate-700 text-slate-200 hover:text-white text-xs font-bold" data-path="' + pathStr + '" title="Collapse or expand group">' +
+                  '<span>' + (node.collapsed ? '▶ Expand' : '▼ Collapse') + '</span>' +
+                '</button>' +
+                '<span class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-md text-xs font-bold border ' + badgeTheme + '">' +
+                  '📁 ' + groupLabel +
+                '</span>' +
+                '<span class="text-xs text-slate-300 font-semibold" data-subtotal-path="' + pathStr + '">' +
+                  'Subtotal: ' + global.SetTimerEngine.formatSeconds(subtotalSec) +
+                '</span>' +
+                '<span class="text-xs text-slate-400">(' + childList.length + (childList.length === 1 ? ' item' : ' items') + ')</span>' +
+              '</div>' +
+
+              '<div class="flex flex-wrap items-center gap-1.5">' +
+                '<button type="button" class="btn-move-up px-2 py-1 rounded-lg bg-slate-900 border border-slate-700 text-slate-300 hover:text-white hover:bg-slate-700 text-xs disabled:opacity-35 disabled:pointer-events-none" data-path="' + pathStr + '" ' + (idx === 0 ? 'disabled' : '') + ' title="Move Up">' +
+                  '↑ Up' +
+                '</button>' +
+                '<button type="button" class="btn-move-down px-2 py-1 rounded-lg bg-slate-900 border border-slate-700 text-slate-300 hover:text-white hover:bg-slate-700 text-xs disabled:opacity-35 disabled:pointer-events-none" data-path="' + pathStr + '" ' + (isLast ? 'disabled' : '') + ' title="Move Down">' +
+                  '↓ Down' +
+                '</button>' +
+                (canIndentIntoSiblingGroup
+                  ? '<button type="button" class="btn-indent-node px-2 py-1 rounded-lg bg-slate-900 border border-indigo-500/40 text-indigo-200 hover:bg-indigo-900/50 text-xs" data-path="' + pathStr + '" title="Move into preceding Group">↳ Into Group</button>'
+                  : '') +
+                (canOutdentToParent
+                  ? '<button type="button" class="btn-outdent-node px-2 py-1 rounded-lg bg-slate-900 border border-amber-500/40 text-amber-200 hover:bg-amber-900/50 text-xs" data-path="' + pathStr + '" title="Move out to parent level">↰ Out of Group</button>'
+                  : '') +
+                '<button type="button" class="btn-duplicate-activity px-2.5 py-1 rounded-lg bg-slate-900 border border-slate-700 text-slate-300 hover:text-emerald-300 hover:border-emerald-500/40 text-xs" data-path="' + pathStr + '" title="Duplicate Group">' +
+                  'Duplicate' +
+                '</button>' +
+                '<button type="button" class="btn-remove-activity px-2.5 py-1 rounded-lg bg-red-950/60 border border-red-500/30 text-red-300 hover:bg-red-900/70 hover:text-white text-xs" data-path="' + pathStr + '" title="Remove Group">' +
+                  'Remove' +
+                '</button>' +
+              '</div>' +
+            '</div>' +
+
+            '<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-12 gap-3 items-end">' +
+              '<div class="lg:col-span-6">' +
+                '<label class="block text-xs font-semibold uppercase tracking-wider text-indigo-200 mb-1">Group / Branch Name</label>' +
+                '<input type="text" class="field-input input-activity-name" data-path="' + pathStr + '" placeholder="e.g., Group A — Core Circuit" value="' + escapeHtml(node.name) + '" />' +
+              '</div>' +
+              '<div class="lg:col-span-3">' +
+                '<label class="block text-xs font-semibold uppercase tracking-wider text-indigo-300 mb-1">Group Repeats / Sets</label>' +
+                '<input type="number" min="1" max="99" class="field-input input-activity-sets" data-path="' + pathStr + '" value="' + escapeHtml(node.sets) + '" />' +
+              '</div>' +
+              '<div class="lg:col-span-3">' +
+                '<label class="block text-xs font-semibold uppercase tracking-wider text-yellow-300 mb-1">Rest Between Group Repeats (sec)</label>' +
+                '<input type="number" min="0" max="3600" class="field-input input-activity-rest" data-path="' + pathStr + '" value="' + escapeHtml(node.restBetweenSets) + '" />' +
+              '</div>' +
+            '</div>' +
+
+            (node.collapsed
+              ? '<div class="mt-3 pt-2.5 border-t border-slate-700/50 text-xs text-slate-400 flex items-center justify-between">' +
+                  '<span>Group collapsed (' + childList.length + ' nested item' + (childList.length === 1 ? '' : 's') + ' hidden)</span>' +
+                  '<button type="button" class="btn-toggle-collapse text-indigo-300 hover:underline font-semibold" data-path="' + pathStr + '">Show Items ▼</button>' +
+                '</div>'
+              : '<div class="mt-4 pl-3 sm:pl-5 border-l-2 ' + (isSubgroup ? 'border-purple-500/50' : 'border-indigo-500/50') + ' space-y-3">' +
+                  (childList.length > 0
+                    ? renderTreeNodesHtml(childList, pathStr, depth + 1, routine)
+                    : '<div class="p-3 rounded-xl bg-slate-900/60 border border-dashed border-slate-700 text-xs text-slate-400 text-center">No exercises in this group yet. Add an exercise below.</div>') +
+                  '<div class="pt-2 flex flex-wrap items-center gap-2">' +
+                    '<button type="button" class="btn-add-child-exercise inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-500/40 text-emerald-300 text-xs font-bold transition" data-path="' + pathStr + '">' +
+                      '+ Add Exercise to ' + escapeHtml(node.name || 'Group') +
+                    '</button>' +
+                    (canAddNestedGroup
+                      ? '<button type="button" class="btn-add-child-group inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-purple-500/20 hover:bg-purple-500/30 border border-purple-500/40 text-purple-200 text-xs font-bold transition" data-path="' + pathStr + '">' +
+                          '📁 + Add Subgroup (Level ' + (depth + 1) + ')' +
+                        '</button>'
+                      : '') +
+                  '</div>' +
+                '</div>'
+            ) +
+          '</div>'
+        );
+      } else {
+        // Exercise Leaf Card (Matches user screenshot layout)
+        htmlParts.push(
+          '<div class="activity-card bg-slate-800/90 border border-slate-700/80 rounded-xl p-4 shadow-sm hover:border-slate-600" data-node-path="' + pathStr + '" data-activity-id="' + escapeHtml(node.id) + '" draggable="false">' +
+            '<div class="flex flex-wrap items-center justify-between gap-2 mb-3 pb-2.5 border-b border-slate-700/60">' +
+              '<div class="flex items-center gap-2.5">' +
+                '<span class="drag-handle inline-flex items-center justify-center w-8 h-8 rounded-lg bg-slate-900/90 border border-slate-700 text-slate-400 hover:text-white hover:border-slate-500" title="Drag to reorder exercise">' +
+                  '<svg class="w-4 h-4 pointer-events-none" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8h16M4 16h16"/></svg>' +
+                '</span>' +
+                '<span class="inline-flex items-center justify-center px-2.5 py-0.5 rounded-md text-xs font-bold bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">' +
+                  'Exercise #' + (idx + 1) + (depth > 1 ? ' (L' + depth + ')' : '') +
+                '</span>' +
+                '<span class="text-xs text-slate-400 font-medium" data-subtotal-path="' + pathStr + '">' +
+                  'Subtotal: ' + global.SetTimerEngine.formatSeconds(subtotalSec) +
+                '</span>' +
+              '</div>' +
+              '<div class="flex flex-wrap items-center gap-1.5">' +
+                '<button type="button" class="btn-move-up px-2 py-1 rounded-lg bg-slate-900 border border-slate-700 text-slate-300 hover:text-white hover:bg-slate-700 text-xs disabled:opacity-35 disabled:pointer-events-none" data-path="' + pathStr + '" ' + (idx === 0 ? 'disabled' : '') + ' title="Move Up">' +
+                  '↑ Up' +
+                '</button>' +
+                '<button type="button" class="btn-move-down px-2 py-1 rounded-lg bg-slate-900 border border-slate-700 text-slate-300 hover:text-white hover:bg-slate-700 text-xs disabled:opacity-35 disabled:pointer-events-none" data-path="' + pathStr + '" ' + (isLast ? 'disabled' : '') + ' title="Move Down">' +
+                  '↓ Down' +
+                '</button>' +
+                (canIndentIntoSiblingGroup
+                  ? '<button type="button" class="btn-indent-node px-2 py-1 rounded-lg bg-slate-900 border border-indigo-500/40 text-indigo-200 hover:bg-indigo-900/50 text-xs" data-path="' + pathStr + '" title="Move into preceding Group">↳ Into Group</button>'
+                  : '') +
+                (canOutdentToParent
+                  ? '<button type="button" class="btn-outdent-node px-2 py-1 rounded-lg bg-slate-900 border border-amber-500/40 text-amber-200 hover:bg-amber-900/50 text-xs" data-path="' + pathStr + '" title="Move out to parent level">↰ Out of Group</button>'
+                  : '') +
+                '<button type="button" class="btn-duplicate-activity px-2.5 py-1 rounded-lg bg-slate-900 border border-slate-700 text-slate-300 hover:text-emerald-300 hover:border-emerald-500/40 text-xs" data-path="' + pathStr + '" title="Duplicate Activity">' +
+                  'Duplicate' +
+                '</button>' +
+                '<button type="button" class="btn-remove-activity px-2.5 py-1 rounded-lg bg-red-950/60 border border-red-500/30 text-red-300 hover:bg-red-900/70 hover:text-white text-xs" data-path="' + pathStr + '" title="Remove Activity">' +
+                  'Remove' +
+                '</button>' +
+              '</div>' +
+            '</div>' +
+
+            '<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-12 gap-3 items-end">' +
+              '<div class="lg:col-span-5">' +
+                '<label class="block text-xs font-semibold uppercase tracking-wider text-slate-300 mb-1">Activity Name</label>' +
+                '<input type="text" class="field-input input-activity-name" data-path="' + pathStr + '" placeholder="e.g., Push-Ups, Crunches, Plank" value="' + escapeHtml(node.name) + '" />' +
+              '</div>' +
+              '<div class="lg:col-span-2">' +
+                '<label class="block text-xs font-semibold uppercase tracking-wider text-emerald-300 mb-1">Number of Sets</label>' +
+                '<input type="number" min="1" max="99" class="field-input input-activity-sets" data-path="' + pathStr + '" value="' + escapeHtml(node.sets) + '" />' +
+              '</div>' +
+              '<div class="lg:col-span-2">' +
+                '<label class="block text-xs font-semibold uppercase tracking-wider text-emerald-300 mb-1">Time per Set (sec)</label>' +
+                '<input type="number" min="1" max="3600" class="field-input input-activity-time" data-path="' + pathStr + '" value="' + escapeHtml(node.timePerSet) + '" />' +
+              '</div>' +
+              '<div class="lg:col-span-3">' +
+                '<label class="block text-xs font-semibold uppercase tracking-wider text-amber-300 mb-1">Rest Between Sets (sec)</label>' +
+                '<input type="number" min="0" max="3600" class="field-input input-activity-rest" data-path="' + pathStr + '" value="' + escapeHtml(node.restBetweenSets) + '" />' +
+              '</div>' +
+            '</div>' +
+          '</div>'
+        );
+      }
+
+      // Connector bar between sibling items (Exercises or Groups)
+      if (!isLast) {
+        const nextNode = list[idx + 1];
+        const connectorLabel = isGroup ? 'Rest after Group' : 'Rest in between Activities';
+        htmlParts.push(
+          '<div class="my-2 px-4 py-2 rounded-lg bg-yellow-500/10 border border-yellow-400/30 flex flex-wrap items-center justify-between gap-2 text-xs">' +
+            '<div class="flex items-center gap-2 text-yellow-200 font-medium">' +
+              '<span class="inline-block w-2.5 h-2.5 rounded-full bg-yellow-400"></span>' +
+              '<span>' + connectorLabel + ' (before <strong data-next-node-name-for="' + pathStr + '">' + escapeHtml(nextNode ? nextNode.name : 'Next Item') + '</strong>):</span>' +
+            '</div>' +
+            '<div class="flex items-center gap-2">' +
+              '<input type="number" min="0" max="3600" class="w-24 bg-slate-900 border border-yellow-400/40 rounded-md px-2.5 py-1 text-yellow-100 font-semibold text-right input-between-activity-rest-item" data-path="' + pathStr + '" value="' + escapeHtml(betweenRestVal) + '" />' +
+              '<span class="text-yellow-200/80">sec (Yellow Screen)</span>' +
+            '</div>' +
+          '</div>'
+        );
+      }
+    });
+
+    return htmlParts.join('');
   }
 
   function renderActivitiesList() {
@@ -242,106 +501,30 @@
 
     if (emptyState) emptyState.classList.add('hidden');
 
-    const total = routine.activities.length;
-    const htmlParts = [];
+    container.innerHTML = renderTreeNodesHtml(routine.activities, '', 1, routine);
 
-    routine.activities.forEach(function (act, idx) {
-      const isLast = (idx === total - 1);
-      const actTotalWork = (parseInt(act.sets, 10) || 1) * (parseInt(act.timePerSet, 10) || 0);
-      const actTotalSetRest = Math.max(0, ((parseInt(act.sets, 10) || 1) - 1)) * (parseInt(act.restBetweenSets, 10) || 0);
-      const actSubtotalSec = actTotalWork + actTotalSetRest;
-      const betweenRestVal = act.restAfterActivity !== undefined ? act.restAfterActivity : routine.betweenActivityRest;
-
-      htmlParts.push(
-        '<div class="activity-card bg-slate-800/90 border border-slate-700/80 rounded-xl p-4 shadow-sm hover:border-slate-600" data-activity-index="' + idx + '" data-activity-id="' + escapeHtml(act.id) + '" draggable="false">' +
-          '<div class="flex flex-wrap items-center justify-between gap-2 mb-3 pb-2.5 border-b border-slate-700/60">' +
-            '<div class="flex items-center gap-2.5">' +
-              '<span class="drag-handle inline-flex items-center justify-center w-8 h-8 rounded-lg bg-slate-900/90 border border-slate-700 text-slate-400 hover:text-white hover:border-slate-500" title="Drag to reorder exercise">' +
-                '<svg class="w-4 h-4 pointer-events-none" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8h16M4 16h16"/></svg>' +
-              '</span>' +
-              '<span class="inline-flex items-center justify-center px-2.5 py-0.5 rounded-md text-xs font-bold bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">' +
-                'Exercise #' + (idx + 1) +
-              '</span>' +
-              '<span class="text-xs text-slate-400 font-medium" data-subtotal-index="' + idx + '">' +
-                'Subtotal: ' + global.SetTimerEngine.formatSeconds(actSubtotalSec) +
-              '</span>' +
-            '</div>' +
-            '<div class="flex items-center gap-1.5">' +
-              '<button type="button" class="btn-move-up px-2 py-1 rounded-lg bg-slate-900 border border-slate-700 text-slate-300 hover:text-white hover:bg-slate-700 text-xs disabled:opacity-35 disabled:pointer-events-none" data-index="' + idx + '" ' + (idx === 0 ? 'disabled' : '') + ' title="Move Up">' +
-                '↑ Up' +
-              '</button>' +
-              '<button type="button" class="btn-move-down px-2 py-1 rounded-lg bg-slate-900 border border-slate-700 text-slate-300 hover:text-white hover:bg-slate-700 text-xs disabled:opacity-35 disabled:pointer-events-none" data-index="' + idx + '" ' + (isLast ? 'disabled' : '') + ' title="Move Down">' +
-                '↓ Down' +
-              '</button>' +
-              '<button type="button" class="btn-duplicate-activity px-2.5 py-1 rounded-lg bg-slate-900 border border-slate-700 text-slate-300 hover:text-emerald-300 hover:border-emerald-500/40 text-xs" data-index="' + idx + '" title="Duplicate Activity">' +
-                'Duplicate' +
-              '</button>' +
-              '<button type="button" class="btn-remove-activity px-2.5 py-1 rounded-lg bg-red-950/60 border border-red-500/30 text-red-300 hover:bg-red-900/70 hover:text-white text-xs" data-index="' + idx + '" title="Remove Activity">' +
-                'Remove' +
-              '</button>' +
-            '</div>' +
-          '</div>' +
-
-          '<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-12 gap-3 items-end">' +
-            '<div class="lg:col-span-5">' +
-              '<label class="block text-xs font-semibold uppercase tracking-wider text-slate-300 mb-1">Activity Name</label>' +
-              '<input type="text" class="field-input input-activity-name" data-index="' + idx + '" placeholder="e.g., Push-Ups, Burpees, Plank" value="' + escapeHtml(act.name) + '" />' +
-            '</div>' +
-            '<div class="lg:col-span-2">' +
-              '<label class="block text-xs font-semibold uppercase tracking-wider text-emerald-300 mb-1">Number of Sets</label>' +
-              '<input type="number" min="1" max="99" class="field-input input-activity-sets" data-index="' + idx + '" value="' + escapeHtml(act.sets) + '" />' +
-            '</div>' +
-            '<div class="lg:col-span-2">' +
-              '<label class="block text-xs font-semibold uppercase tracking-wider text-emerald-300 mb-1">Time per Set (sec)</label>' +
-              '<input type="number" min="1" max="3600" class="field-input input-activity-time" data-index="' + idx + '" value="' + escapeHtml(act.timePerSet) + '" />' +
-            '</div>' +
-            '<div class="lg:col-span-3">' +
-              '<label class="block text-xs font-semibold uppercase tracking-wider text-amber-300 mb-1">Rest Between Sets (sec)</label>' +
-              '<input type="number" min="0" max="3600" class="field-input input-activity-rest" data-index="' + idx + '" value="' + escapeHtml(act.restBetweenSets) + '" />' +
-            '</div>' +
-          '</div>' +
-        '</div>'
-      );
-
-      // Connector bar for "In between activities, user can set rest time"
-      if (!isLast) {
-        const nextAct = routine.activities[idx + 1];
-        htmlParts.push(
-          '<div class="my-2 px-4 py-2 rounded-lg bg-yellow-500/10 border border-yellow-400/30 flex flex-wrap items-center justify-between gap-2 text-xs">' +
-            '<div class="flex items-center gap-2 text-yellow-200 font-medium">' +
-              '<span class="inline-block w-2.5 h-2.5 rounded-full bg-yellow-400"></span>' +
-              '<span>Rest in between Activities (before <strong data-next-activity-name-for="' + idx + '">' + escapeHtml(nextAct ? nextAct.name : 'Next Activity') + '</strong>):</span>' +
-            '</div>' +
-            '<div class="flex items-center gap-2">' +
-              '<input type="number" min="0" max="3600" class="w-24 bg-slate-900 border border-yellow-400/40 rounded-md px-2.5 py-1 text-yellow-100 font-semibold text-right input-between-activity-rest-item" data-index="' + idx + '" value="' + escapeHtml(betweenRestVal) + '" />' +
-              '<span class="text-yellow-200/80">sec (Yellow Screen)</span>' +
-            '</div>' +
-          '</div>'
-        );
-      }
-    });
-
-    container.innerHTML = htmlParts.join('');
-
-    // Attach input listeners that dynamically resolve getActiveRoutine() and update in-place
+    // Attach input listeners for Exercise and Group fields
     container.querySelectorAll('.input-activity-name').forEach(function (input) {
       input.addEventListener('input', function (e) {
         const currentRoutine = getActiveRoutine();
-        const idx = parseInt(e.target.getAttribute('data-index'), 10);
-        if (currentRoutine && currentRoutine.activities[idx]) {
-          currentRoutine.activities[idx].name = e.target.value;
-          updateActivityCardInPlace(idx);
+        const pathStr = e.target.getAttribute('data-path');
+        const resolved = resolveNodeByPath(currentRoutine, pathStr);
+        if (resolved && resolved.node) {
+          resolved.node.name = e.target.value;
+          refreshAllNodeSubtotalsInPlace();
           persistAll(false);
         }
       });
       input.addEventListener('blur', function (e) {
         const currentRoutine = getActiveRoutine();
-        const idx = parseInt(e.target.getAttribute('data-index'), 10);
-        if (currentRoutine && currentRoutine.activities[idx]) {
-          const trimmed = String(e.target.value || '').trim() || ('Exercise ' + (idx + 1));
-          currentRoutine.activities[idx].name = trimmed;
+        const pathStr = e.target.getAttribute('data-path');
+        const resolved = resolveNodeByPath(currentRoutine, pathStr);
+        if (resolved && resolved.node) {
+          const fallback = resolved.node.type === 'group' ? ('Group ' + (resolved.index + 1)) : ('Exercise ' + (resolved.index + 1));
+          const trimmed = String(e.target.value || '').trim() || fallback;
+          resolved.node.name = trimmed;
           e.target.value = trimmed;
-          updateActivityCardInPlace(idx);
+          refreshAllNodeSubtotalsInPlace();
           persistAll(false);
         }
       });
@@ -350,23 +533,25 @@
     container.querySelectorAll('.input-activity-sets').forEach(function (input) {
       input.addEventListener('input', function (e) {
         const currentRoutine = getActiveRoutine();
-        const idx = parseInt(e.target.getAttribute('data-index'), 10);
+        const pathStr = e.target.getAttribute('data-path');
+        const resolved = resolveNodeByPath(currentRoutine, pathStr);
         const parsed = parseInt(e.target.value, 10);
-        if (currentRoutine && currentRoutine.activities[idx] && !isNaN(parsed) && parsed >= 1) {
-          currentRoutine.activities[idx].sets = parsed;
-          updateActivityCardInPlace(idx);
+        if (resolved && resolved.node && !isNaN(parsed) && parsed >= 1) {
+          resolved.node.sets = parsed;
+          refreshAllNodeSubtotalsInPlace();
           persistAll(false);
         }
       });
       input.addEventListener('blur', function (e) {
         const currentRoutine = getActiveRoutine();
-        const idx = parseInt(e.target.getAttribute('data-index'), 10);
-        if (currentRoutine && currentRoutine.activities[idx]) {
+        const pathStr = e.target.getAttribute('data-path');
+        const resolved = resolveNodeByPath(currentRoutine, pathStr);
+        if (resolved && resolved.node) {
           const parsed = parseInt(e.target.value, 10);
-          const safeVal = (!isNaN(parsed) && parsed >= 1) ? parsed : (currentRoutine.activities[idx].sets || 1);
-          currentRoutine.activities[idx].sets = safeVal;
+          const safeVal = (!isNaN(parsed) && parsed >= 1) ? parsed : (resolved.node.sets || 1);
+          resolved.node.sets = safeVal;
           e.target.value = String(safeVal);
-          updateActivityCardInPlace(idx);
+          refreshAllNodeSubtotalsInPlace();
           persistAll(false);
         }
       });
@@ -375,23 +560,25 @@
     container.querySelectorAll('.input-activity-time').forEach(function (input) {
       input.addEventListener('input', function (e) {
         const currentRoutine = getActiveRoutine();
-        const idx = parseInt(e.target.getAttribute('data-index'), 10);
+        const pathStr = e.target.getAttribute('data-path');
+        const resolved = resolveNodeByPath(currentRoutine, pathStr);
         const parsed = parseInt(e.target.value, 10);
-        if (currentRoutine && currentRoutine.activities[idx] && !isNaN(parsed) && parsed >= 1) {
-          currentRoutine.activities[idx].timePerSet = parsed;
-          updateActivityCardInPlace(idx);
+        if (resolved && resolved.node && !isNaN(parsed) && parsed >= 1) {
+          resolved.node.timePerSet = parsed;
+          refreshAllNodeSubtotalsInPlace();
           persistAll(false);
         }
       });
       input.addEventListener('blur', function (e) {
         const currentRoutine = getActiveRoutine();
-        const idx = parseInt(e.target.getAttribute('data-index'), 10);
-        if (currentRoutine && currentRoutine.activities[idx]) {
+        const pathStr = e.target.getAttribute('data-path');
+        const resolved = resolveNodeByPath(currentRoutine, pathStr);
+        if (resolved && resolved.node) {
           const parsed = parseInt(e.target.value, 10);
-          const safeVal = (!isNaN(parsed) && parsed >= 1) ? parsed : (currentRoutine.activities[idx].timePerSet || 30);
-          currentRoutine.activities[idx].timePerSet = safeVal;
+          const safeVal = (!isNaN(parsed) && parsed >= 1) ? parsed : (resolved.node.timePerSet || 30);
+          resolved.node.timePerSet = safeVal;
           e.target.value = String(safeVal);
-          updateActivityCardInPlace(idx);
+          refreshAllNodeSubtotalsInPlace();
           persistAll(false);
         }
       });
@@ -400,23 +587,25 @@
     container.querySelectorAll('.input-activity-rest').forEach(function (input) {
       input.addEventListener('input', function (e) {
         const currentRoutine = getActiveRoutine();
-        const idx = parseInt(e.target.getAttribute('data-index'), 10);
+        const pathStr = e.target.getAttribute('data-path');
+        const resolved = resolveNodeByPath(currentRoutine, pathStr);
         const parsed = parseInt(e.target.value, 10);
-        if (currentRoutine && currentRoutine.activities[idx] && !isNaN(parsed) && parsed >= 0) {
-          currentRoutine.activities[idx].restBetweenSets = parsed;
-          updateActivityCardInPlace(idx);
+        if (resolved && resolved.node && !isNaN(parsed) && parsed >= 0) {
+          resolved.node.restBetweenSets = parsed;
+          refreshAllNodeSubtotalsInPlace();
           persistAll(false);
         }
       });
       input.addEventListener('blur', function (e) {
         const currentRoutine = getActiveRoutine();
-        const idx = parseInt(e.target.getAttribute('data-index'), 10);
-        if (currentRoutine && currentRoutine.activities[idx]) {
+        const pathStr = e.target.getAttribute('data-path');
+        const resolved = resolveNodeByPath(currentRoutine, pathStr);
+        if (resolved && resolved.node) {
           const parsed = parseInt(e.target.value, 10);
-          const safeVal = (!isNaN(parsed) && parsed >= 0) ? parsed : (currentRoutine.activities[idx].restBetweenSets !== undefined ? currentRoutine.activities[idx].restBetweenSets : 15);
-          currentRoutine.activities[idx].restBetweenSets = safeVal;
+          const safeVal = (!isNaN(parsed) && parsed >= 0) ? parsed : (resolved.node.restBetweenSets !== undefined ? resolved.node.restBetweenSets : 15);
+          resolved.node.restBetweenSets = safeVal;
           e.target.value = String(safeVal);
-          updateActivityCardInPlace(idx);
+          refreshAllNodeSubtotalsInPlace();
           persistAll(false);
         }
       });
@@ -425,34 +614,95 @@
     container.querySelectorAll('.input-between-activity-rest-item').forEach(function (input) {
       input.addEventListener('input', function (e) {
         const currentRoutine = getActiveRoutine();
-        const idx = parseInt(e.target.getAttribute('data-index'), 10);
+        const pathStr = e.target.getAttribute('data-path');
+        const resolved = resolveNodeByPath(currentRoutine, pathStr);
         const parsed = parseInt(e.target.value, 10);
-        if (currentRoutine && currentRoutine.activities[idx] && !isNaN(parsed) && parsed >= 0) {
-          currentRoutine.activities[idx].restAfterActivity = parsed;
+        if (resolved && resolved.node && !isNaN(parsed) && parsed >= 0) {
+          resolved.node.restAfterActivity = parsed;
+          refreshAllNodeSubtotalsInPlace();
           persistAll(false);
         }
       });
       input.addEventListener('blur', function (e) {
         const currentRoutine = getActiveRoutine();
-        const idx = parseInt(e.target.getAttribute('data-index'), 10);
-        if (currentRoutine && currentRoutine.activities[idx]) {
+        const pathStr = e.target.getAttribute('data-path');
+        const resolved = resolveNodeByPath(currentRoutine, pathStr);
+        if (resolved && resolved.node) {
           const parsed = parseInt(e.target.value, 10);
           const safeVal = (!isNaN(parsed) && parsed >= 0)
             ? parsed
-            : (currentRoutine.activities[idx].restAfterActivity !== undefined ? currentRoutine.activities[idx].restAfterActivity : currentRoutine.betweenActivityRest);
-          currentRoutine.activities[idx].restAfterActivity = safeVal;
+            : (resolved.node.restAfterActivity !== undefined ? resolved.node.restAfterActivity : currentRoutine.betweenActivityRest);
+          resolved.node.restAfterActivity = safeVal;
           e.target.value = String(safeVal);
+          refreshAllNodeSubtotalsInPlace();
           persistAll(false);
         }
       });
     });
 
-    // Move Up / Move Down / Duplicate / Remove buttons
+    // Collapse / Expand Group
+    container.querySelectorAll('.btn-toggle-collapse').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        const currentRoutine = getActiveRoutine();
+        const pathStr = btn.getAttribute('data-path');
+        const resolved = resolveNodeByPath(currentRoutine, pathStr);
+        if (resolved && resolved.node && resolved.node.type === 'group') {
+          resolved.node.collapsed = !resolved.node.collapsed;
+          persistAll(false);
+          renderActivitiesList();
+        }
+      });
+    });
+
+    // Add Child Exercise inside Group/Subgroup
+    container.querySelectorAll('.btn-add-child-exercise').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        const currentRoutine = getActiveRoutine();
+        const pathStr = btn.getAttribute('data-path');
+        const resolved = resolveNodeByPath(currentRoutine, pathStr);
+        if (resolved && resolved.node && resolved.node.type === 'group') {
+          if (!Array.isArray(resolved.node.children)) resolved.node.children = [];
+          const nextNum = resolved.node.children.length + 1;
+          const newAct = global.SetTimerStorage.createBlankActivity(currentRoutine.betweenActivityRest, 'Exercise ' + nextNum);
+          resolved.node.children.push(newAct);
+          resolved.node.collapsed = false;
+          persistAll(true, 'Added "' + newAct.name + '" to "' + resolved.node.name + '".');
+          renderActivitiesList();
+        }
+      });
+    });
+
+    // Add Child Subgroup inside Level 1 Group
+    container.querySelectorAll('.btn-add-child-group').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        const currentRoutine = getActiveRoutine();
+        const pathStr = btn.getAttribute('data-path');
+        const resolved = resolveNodeByPath(currentRoutine, pathStr);
+        if (resolved && resolved.node && resolved.node.type === 'group') {
+          if (resolved.depth >= global.SetTimerStorage.MAX_TREE_DEPTH - 1) {
+            showToast('Maximum nesting depth (3 levels) reached.', true);
+            return;
+          }
+          if (!Array.isArray(resolved.node.children)) resolved.node.children = [];
+          const subCount = resolved.node.children.filter(function (c) { return c.type === 'group'; }).length + 1;
+          const newSub = global.SetTimerStorage.createBlankGroup(currentRoutine.betweenActivityRest, resolved.depth + 1, 'Subgroup ' + subCount);
+          resolved.node.children.push(newSub);
+          resolved.node.collapsed = false;
+          persistAll(true, 'Added "' + newSub.name + '" inside "' + resolved.node.name + '".');
+          renderActivitiesList();
+        }
+      });
+    });
+
+    // Move Up / Down within same parent
     container.querySelectorAll('.btn-move-up').forEach(function (btn) {
       btn.addEventListener('click', function () {
-        const idx = parseInt(btn.getAttribute('data-index'), 10);
+        const pathStr = btn.getAttribute('data-path');
+        const parts = String(pathStr).split('.');
+        const idx = parseInt(parts.pop(), 10);
+        const parentPath = parts.join('.');
         if (idx > 0) {
-          reorderActivities(idx, idx - 1);
+          reorderTreeNodes(parentPath, idx, idx - 1);
         }
       });
     });
@@ -460,60 +710,103 @@
     container.querySelectorAll('.btn-move-down').forEach(function (btn) {
       btn.addEventListener('click', function () {
         const currentRoutine = getActiveRoutine();
-        const idx = parseInt(btn.getAttribute('data-index'), 10);
-        if (currentRoutine && idx < currentRoutine.activities.length - 1) {
-          reorderActivities(idx, idx + 1);
+        const pathStr = btn.getAttribute('data-path');
+        const parts = String(pathStr).split('.');
+        const idx = parseInt(parts.pop(), 10);
+        const parentPath = parts.join('.');
+        const siblingList = getSiblingListByParentPath(currentRoutine, parentPath);
+        if (siblingList && idx < siblingList.length - 1) {
+          reorderTreeNodes(parentPath, idx, idx + 1);
         }
       });
     });
 
+    // Move into preceding Group (Indent)
+    container.querySelectorAll('.btn-indent-node').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        const currentRoutine = getActiveRoutine();
+        const pathStr = btn.getAttribute('data-path');
+        const resolved = resolveNodeByPath(currentRoutine, pathStr);
+        if (!resolved || !resolved.parentList || resolved.index <= 0) return;
+        const prevSibling = resolved.parentList[resolved.index - 1];
+        if (!prevSibling || prevSibling.type !== 'group') return;
+        const nodeHeight = global.SetTimerStorage.getSubtreeHeight(resolved.node);
+        if (resolved.depth + nodeHeight > global.SetTimerStorage.MAX_TREE_DEPTH) {
+          showToast('Cannot move deeper than 3 tree levels.', true);
+          return;
+        }
+        const moved = resolved.parentList.splice(resolved.index, 1)[0];
+        if (!Array.isArray(prevSibling.children)) prevSibling.children = [];
+        prevSibling.children.push(moved);
+        prevSibling.collapsed = false;
+        persistAll(true, 'Moved "' + moved.name + '" into "' + prevSibling.name + '".');
+        renderActivitiesList();
+      });
+    });
+
+    // Move out of Group to parent level (Outdent)
+    container.querySelectorAll('.btn-outdent-node').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        const currentRoutine = getActiveRoutine();
+        const pathStr = btn.getAttribute('data-path');
+        const parts = String(pathStr).split('.');
+        if (parts.length < 2) return;
+        const childIdx = parseInt(parts.pop(), 10);
+        const parentPath = parts.join('.');
+        const parentResolved = resolveNodeByPath(currentRoutine, parentPath);
+        if (!parentResolved || !parentResolved.node || !parentResolved.parentList) return;
+        const moved = parentResolved.node.children.splice(childIdx, 1)[0];
+        parentResolved.parentList.splice(parentResolved.index + 1, 0, moved);
+        persistAll(true, 'Moved "' + moved.name + '" out of "' + parentResolved.node.name + '".');
+        renderActivitiesList();
+      });
+    });
+
+    // Duplicate Exercise or Group (deep clone)
     container.querySelectorAll('.btn-duplicate-activity').forEach(function (btn) {
       btn.addEventListener('click', function () {
         const currentRoutine = getActiveRoutine();
         if (!currentRoutine) return;
-        const idx = parseInt(btn.getAttribute('data-index'), 10);
-        const src = currentRoutine.activities[idx];
-        if (!src) return;
-        const copy = global.SetTimerStorage.sanitizeActivity({
-          id: global.SetTimerStorage.generateId('act'),
-          name: src.name + ' (Copy)',
-          sets: src.sets,
-          timePerSet: src.timePerSet,
-          restBetweenSets: src.restBetweenSets,
-          restAfterActivity: src.restAfterActivity
-        }, currentRoutine.betweenActivityRest);
-        currentRoutine.activities.splice(idx + 1, 0, copy);
-        persistAll(true, 'Duplicated "' + src.name + '".');
+        const pathStr = btn.getAttribute('data-path');
+        const resolved = resolveNodeByPath(currentRoutine, pathStr);
+        if (!resolved || !resolved.node || !resolved.parentList) return;
+        const copy = global.SetTimerStorage.cloneTreeNode(resolved.node, currentRoutine.betweenActivityRest, resolved.depth);
+        copy.name = resolved.node.name + ' (Copy)';
+        resolved.parentList.splice(resolved.index + 1, 0, copy);
+        persistAll(true, 'Duplicated "' + resolved.node.name + '".');
         renderActivitiesList();
       });
     });
 
+    // Remove Exercise or Group
     container.querySelectorAll('.btn-remove-activity').forEach(function (btn) {
       btn.addEventListener('click', function () {
         const currentRoutine = getActiveRoutine();
         if (!currentRoutine) return;
-        const idx = parseInt(btn.getAttribute('data-index'), 10);
-        const removed = currentRoutine.activities.splice(idx, 1)[0];
-        persistAll(true, 'Removed activity "' + (removed ? removed.name : '') + '".');
+        const pathStr = btn.getAttribute('data-path');
+        const resolved = resolveNodeByPath(currentRoutine, pathStr);
+        if (!resolved || !resolved.parentList) return;
+        const removed = resolved.parentList.splice(resolved.index, 1)[0];
+        persistAll(true, 'Removed "' + (removed ? removed.name : '') + '".');
         renderActivitiesList();
       });
     });
 
-    // Attach Drag and Drop handlers
-    global.SetTimerDragDrop.attachDragAndDrop(container, reorderActivities);
+    global.SetTimerDragDrop.attachDragAndDrop(container, reorderTreeNodes);
     renderRoutineSummaryBar();
   }
 
-  function reorderActivities(fromIndex, toIndex) {
+  function reorderTreeNodes(parentPath, fromIndex, toIndex) {
     const routine = getActiveRoutine();
-    if (!routine || !Array.isArray(routine.activities)) return;
-    if (fromIndex < 0 || fromIndex >= routine.activities.length) return;
-    const clampedTo = Math.max(0, Math.min(routine.activities.length - 1, toIndex));
+    const list = getSiblingListByParentPath(routine, parentPath);
+    if (!list || !Array.isArray(list)) return;
+    if (fromIndex < 0 || fromIndex >= list.length) return;
+    const clampedTo = Math.max(0, Math.min(list.length - 1, toIndex));
     if (fromIndex === clampedTo) return;
 
-    const moved = routine.activities.splice(fromIndex, 1)[0];
-    routine.activities.splice(clampedTo, 0, moved);
-    persistAll(true, 'Updated exercise order.');
+    const moved = list.splice(fromIndex, 1)[0];
+    list.splice(clampedTo, 0, moved);
+    persistAll(true, 'Updated order.');
     renderActivitiesList();
   }
 
@@ -525,12 +818,13 @@
   }
 
   /* ==========================================================================
-     Run Mode UI & State Screen Coloring
+     Run Mode UI & State Screen Coloring (Includes Bright Blue Prepare State)
      ========================================================================== */
   function applyRunScreenStateClasses(runSectionEl, snapshot) {
     if (!runSectionEl || !snapshot) return;
 
     runSectionEl.classList.remove(
+      'run-state-prepare',
       'run-state-activity',
       'run-state-set-rest',
       'run-state-between',
@@ -545,6 +839,8 @@
 
     if (snapshot.isFinished || snapshot.phase === global.SetTimerEngine.PHASE_END) {
       runSectionEl.classList.add('run-state-end');
+    } else if (snapshot.phase === global.SetTimerEngine.PHASE_PREPARE) {
+      runSectionEl.classList.add('run-state-prepare');
     } else if (snapshot.phase === global.SetTimerEngine.PHASE_ACTIVITY) {
       runSectionEl.classList.add('run-state-activity');
     } else if (snapshot.phase === global.SetTimerEngine.PHASE_SET_REST) {
@@ -557,6 +853,7 @@
   function renderRunScreen(snapshot) {
     const runSection = document.getElementById('run-mode-screen');
     const routineTitleEl = document.getElementById('run-routine-title');
+    const treeBreadcrumbEl = document.getElementById('run-tree-breadcrumb');
     const phaseBadgeEl = document.getElementById('run-phase-badge');
     const pausedBannerEl = document.getElementById('run-paused-banner');
     const mainHeadingEl = document.getElementById('run-main-heading');
@@ -599,11 +896,12 @@
     }
 
     if (snapshot.isFinished || snapshot.phase === global.SetTimerEngine.PHASE_END) {
+      if (treeBreadcrumbEl) treeBreadcrumbEl.classList.add('hidden');
       if (phaseBadgeEl) phaseBadgeEl.textContent = 'ROUTINE COMPLETE';
       if (mainHeadingEl) mainHeadingEl.textContent = 'END';
       if (subHeadingEl) {
         subHeadingEl.textContent = routine
-          ? ('Completed all ' + routine.activities.length + ' activities in "' + routine.name + '"!')
+          ? ('Completed all intervals in "' + routine.name + '"!')
           : 'Workout Complete!';
       }
       if (countdownEl) countdownEl.textContent = 'END';
@@ -621,6 +919,15 @@
     const step = snapshot.step;
     if (!step) return;
 
+    if (treeBreadcrumbEl) {
+      if (step.breadcrumb) {
+        treeBreadcrumbEl.textContent = '📁 ' + step.breadcrumb;
+        treeBreadcrumbEl.classList.remove('hidden');
+      } else {
+        treeBreadcrumbEl.classList.add('hidden');
+      }
+    }
+
     if (countdownEl) {
       countdownEl.textContent = snapshot.remainingFormatted;
     }
@@ -632,10 +939,24 @@
     if (stepCounterEl) {
       stepCounterEl.textContent =
         'Interval ' + (snapshot.stepIndex + 1) + ' of ' + snapshot.totalSteps +
-        ' • Exercise ' + step.activityIndex + ' of ' + step.totalActivities;
+        ' • Exercise Run ' + step.activityIndex + ' of ' + step.totalActivities;
     }
 
-    if (step.phase === global.SetTimerEngine.PHASE_ACTIVITY) {
+    if (step.phase === global.SetTimerEngine.PHASE_PREPARE) {
+      if (phaseBadgeEl) {
+        phaseBadgeEl.textContent = snapshot.isPaused ? 'PREPARE TIME (PAUSED)' : 'GET READY — PREPARE TIME';
+      }
+      if (mainHeadingEl) {
+        mainHeadingEl.textContent = 'PREPARE';
+      }
+      if (subHeadingEl) {
+        subHeadingEl.textContent = 'First Exercise: ' + (step.upNextName || 'Workout');
+      }
+      if (upNextCardEl && upNextTextEl) {
+        upNextCardEl.classList.remove('hidden');
+        upNextTextEl.textContent = 'Up First: ' + (step.upNextHint || step.upNextName || '');
+      }
+    } else if (step.phase === global.SetTimerEngine.PHASE_ACTIVITY) {
       if (phaseBadgeEl) {
         phaseBadgeEl.textContent = snapshot.isPaused ? 'ACTIVITY (PAUSED)' : 'WORK — ACTIVE SET';
       }
@@ -643,7 +964,8 @@
         mainHeadingEl.textContent = step.activityName;
       }
       if (subHeadingEl) {
-        subHeadingEl.textContent = 'Set ' + step.currentSet + ' of ' + step.totalSets;
+        subHeadingEl.textContent = 'Set ' + step.currentSet + ' of ' + step.totalSets +
+          (step.breadcrumb ? (' • ' + step.breadcrumb) : '');
       }
       if (upNextCardEl && upNextTextEl) {
         upNextCardEl.classList.remove('hidden');
@@ -665,13 +987,17 @@
       }
     } else if (step.phase === global.SetTimerEngine.PHASE_BETWEEN) {
       if (phaseBadgeEl) {
-        phaseBadgeEl.textContent = snapshot.isPaused ? 'BETWEEN ACTIVITIES (PAUSED)' : 'REST BETWEEN ACTIVITIES';
+        if (step.transitionType === 'GROUP_REPEAT_REST') {
+          phaseBadgeEl.textContent = snapshot.isPaused ? 'GROUP REPEAT REST (PAUSED)' : 'REST BETWEEN GROUP REPEATS';
+        } else {
+          phaseBadgeEl.textContent = snapshot.isPaused ? 'BETWEEN ACTIVITIES (PAUSED)' : 'REST BETWEEN ACTIVITIES';
+        }
       }
       if (mainHeadingEl) {
         mainHeadingEl.textContent = 'UP NEXT: ' + step.upNextName;
       }
       if (subHeadingEl) {
-        subHeadingEl.textContent = 'Get Ready • ' + (step.upNextDetails || '');
+        subHeadingEl.textContent = (step.activityName || 'Get Ready') + ' • ' + (step.upNextDetails || '');
       }
       if (upNextCardEl && upNextTextEl) {
         upNextCardEl.classList.remove('hidden');
@@ -689,6 +1015,14 @@
       routine.name = String(nameInput.value).trim();
     }
 
+    const prepInput = document.getElementById('prepare-time-input');
+    if (prepInput) {
+      const parsedPrep = parseInt(prepInput.value, 10);
+      if (!isNaN(parsedPrep) && parsedPrep >= 0) {
+        routine.prepareTime = parsedPrep;
+      }
+    }
+
     const betweenInput = document.getElementById('between-activity-rest-input');
     if (betweenInput) {
       const parsedBetween = parseInt(betweenInput.value, 10);
@@ -699,30 +1033,37 @@
 
     const container = document.getElementById('activities-list-container');
     if (container) {
-      container.querySelectorAll('.activity-card[data-activity-index]').forEach(function (card) {
-        const idx = parseInt(card.getAttribute('data-activity-index'), 10);
-        const act = routine.activities[idx];
-        if (!act) return;
-        const nameEl = card.querySelector('.input-activity-name');
-        const setsEl = card.querySelector('.input-activity-sets');
-        const timeEl = card.querySelector('.input-activity-time');
-        const restEl = card.querySelector('.input-activity-rest');
-
-        if (nameEl) act.name = String(nameEl.value || '').trim() || ('Exercise ' + (idx + 1));
-        if (setsEl) act.sets = Math.max(1, parseInt(setsEl.value, 10) || 1);
-        if (timeEl) act.timePerSet = Math.max(1, parseInt(timeEl.value, 10) || 1);
-        if (restEl) {
-          const r = parseInt(restEl.value, 10);
-          act.restBetweenSets = (!isNaN(r) && r >= 0) ? r : 0;
+      container.querySelectorAll('.input-activity-name[data-path]').forEach(function (el) {
+        const resolved = resolveNodeByPath(routine, el.getAttribute('data-path'));
+        if (resolved && resolved.node) {
+          resolved.node.name = String(el.value || '').trim() || (resolved.node.type === 'group' ? 'Group' : 'Exercise');
         }
       });
-
-      container.querySelectorAll('.input-between-activity-rest-item').forEach(function (el) {
-        const idx = parseInt(el.getAttribute('data-index'), 10);
-        const act = routine.activities[idx];
-        if (!act) return;
-        const r = parseInt(el.value, 10);
-        act.restAfterActivity = (!isNaN(r) && r >= 0) ? r : routine.betweenActivityRest;
+      container.querySelectorAll('.input-activity-sets[data-path]').forEach(function (el) {
+        const resolved = resolveNodeByPath(routine, el.getAttribute('data-path'));
+        if (resolved && resolved.node) {
+          resolved.node.sets = Math.max(1, parseInt(el.value, 10) || 1);
+        }
+      });
+      container.querySelectorAll('.input-activity-time[data-path]').forEach(function (el) {
+        const resolved = resolveNodeByPath(routine, el.getAttribute('data-path'));
+        if (resolved && resolved.node && resolved.node.type !== 'group') {
+          resolved.node.timePerSet = Math.max(1, parseInt(el.value, 10) || 1);
+        }
+      });
+      container.querySelectorAll('.input-activity-rest[data-path]').forEach(function (el) {
+        const resolved = resolveNodeByPath(routine, el.getAttribute('data-path'));
+        if (resolved && resolved.node) {
+          const r = parseInt(el.value, 10);
+          resolved.node.restBetweenSets = (!isNaN(r) && r >= 0) ? r : 0;
+        }
+      });
+      container.querySelectorAll('.input-between-activity-rest-item[data-path]').forEach(function (el) {
+        const resolved = resolveNodeByPath(routine, el.getAttribute('data-path'));
+        if (resolved && resolved.node) {
+          const r = parseInt(el.value, 10);
+          resolved.node.restAfterActivity = (!isNaN(r) && r >= 0) ? r : routine.betweenActivityRest;
+        }
       });
     }
   }
@@ -730,8 +1071,9 @@
   function startRoutineRun() {
     syncInputsToStateBeforeRun();
     const routine = getActiveRoutine();
-    if (!routine || !Array.isArray(routine.activities) || routine.activities.length === 0) {
-      showToast('Please add at least one Activity before starting the timer.', true);
+    const runs = global.SetTimerEngine.expandRoutineTreeToRuns(routine);
+    if (!routine || runs.length === 0) {
+      showToast('Please add at least one Exercise before starting the timer.', true);
       return;
     }
 
@@ -754,7 +1096,6 @@
   }
 
   function registerPwaServiceWorker() {
-    // Show helpful warning if user opened via file:// or content:// on Android
     const protocol = global.location && global.location.protocol ? global.location.protocol : '';
     const warningBanner = document.getElementById('local-file-pwa-warning');
     if (protocol === 'file:' || protocol === 'content:') {
@@ -805,7 +1146,6 @@
     routines = global.SetTimerStorage.loadRoutines();
     activeRoutineId = global.SetTimerStorage.loadActiveRoutineId(routines);
 
-    // Initialize saved sound volume (0 - 100%)
     const savedVol = global.SetTimerStorage.loadVolume();
     if (savedVol > 0) {
       lastNonZeroVolume = savedVol;
@@ -826,9 +1166,10 @@
     const editVolumeSlider = document.getElementById('edit-volume-slider');
     if (editVolumeSlider) {
       editVolumeSlider.addEventListener('input', function (e) {
-        applyVolumeChange(e.target.value, false);
+        applyVolumeChange(e.target.value, true);
       });
       editVolumeSlider.addEventListener('change', function (e) {
+        lastPreviewTimestamp = 0;
         applyVolumeChange(e.target.value, true);
       });
     }
@@ -836,9 +1177,10 @@
     const runVolumeSlider = document.getElementById('run-volume-slider');
     if (runVolumeSlider) {
       runVolumeSlider.addEventListener('input', function (e) {
-        applyVolumeChange(e.target.value, false);
+        applyVolumeChange(e.target.value, true);
       });
       runVolumeSlider.addEventListener('change', function (e) {
+        lastPreviewTimestamp = 0;
         applyVolumeChange(e.target.value, true);
       });
     }
@@ -882,6 +1224,27 @@
       });
     }
 
+    const prepareTimeInput = document.getElementById('prepare-time-input');
+    if (prepareTimeInput) {
+      prepareTimeInput.addEventListener('input', function (e) {
+        const routine = getActiveRoutine();
+        if (!routine) return;
+        const raw = parseInt(e.target.value, 10);
+        if (isNaN(raw) || raw < 0) return;
+        routine.prepareTime = raw;
+        persistAll(false);
+      });
+      prepareTimeInput.addEventListener('blur', function (e) {
+        const routine = getActiveRoutine();
+        if (!routine) return;
+        const raw = parseInt(e.target.value, 10);
+        const safeVal = (!isNaN(raw) && raw >= 0) ? raw : (routine.prepareTime !== undefined ? routine.prepareTime : 15);
+        routine.prepareTime = safeVal;
+        e.target.value = String(safeVal);
+        persistAll(false);
+      });
+    }
+
     const betweenRestInput = document.getElementById('between-activity-rest-input');
     if (betweenRestInput) {
       betweenRestInput.addEventListener('input', function (e) {
@@ -890,10 +1253,17 @@
         const raw = parseInt(e.target.value, 10);
         if (isNaN(raw) || raw < 0) return;
         routine.betweenActivityRest = raw;
-        routine.activities.forEach(function (act) {
-          act.restAfterActivity = raw;
-        });
-        // Update connector inputs in-place without destroying DOM focus
+
+        function updateAllRests(nodes) {
+          (nodes || []).forEach(function (n) {
+            n.restAfterActivity = raw;
+            if (n.type === 'group' && Array.isArray(n.children)) {
+              updateAllRests(n.children);
+            }
+          });
+        }
+        updateAllRests(routine.activities);
+
         const container = document.getElementById('activities-list-container');
         if (container) {
           container.querySelectorAll('.input-between-activity-rest-item').forEach(function (el) {
@@ -902,6 +1272,7 @@
             }
           });
         }
+        refreshAllNodeSubtotalsInPlace();
         persistAll(false);
       });
       betweenRestInput.addEventListener('blur', function (e) {
@@ -964,10 +1335,23 @@
         const routine = getActiveRoutine();
         if (!routine) return;
         const nextNum = routine.activities.length + 1;
-        const newAct = global.SetTimerStorage.createBlankActivity(routine.betweenActivityRest);
-        newAct.name = 'Exercise ' + nextNum;
+        const newAct = global.SetTimerStorage.createBlankActivity(routine.betweenActivityRest, 'Exercise ' + nextNum);
         routine.activities.push(newAct);
         persistAll(true, 'Added "' + newAct.name + '".');
+        renderActivitiesList();
+      });
+    }
+
+    const btnAddGroup = document.getElementById('btn-add-group');
+    if (btnAddGroup) {
+      btnAddGroup.addEventListener('click', function () {
+        const routine = getActiveRoutine();
+        if (!routine) return;
+        const groupCount = routine.activities.filter(function (a) { return a.type === 'group'; }).length + 1;
+        const letter = String.fromCharCode(64 + Math.min(26, groupCount));
+        const newGrp = global.SetTimerStorage.createBlankGroup(routine.betweenActivityRest, 1, 'Group ' + letter);
+        routine.activities.push(newGrp);
+        persistAll(true, 'Added "' + newGrp.name + '".');
         renderActivitiesList();
       });
     }

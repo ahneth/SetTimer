@@ -1,7 +1,7 @@
 /* ==========================================================================
    SetTimer - Excel Backup & Restore Module (excel.js)
-   Exports routines into an Excel (.xlsx) workbook for backup and restores
-   routines from uploaded Excel (.xlsx / .xls / .csv) backup files.
+   Exports hierarchical exercise trees & Prepare Time into an Excel (.xlsx)
+   workbook and restores routines from both tree and legacy flat backups.
    ========================================================================== */
 
 (function (global) {
@@ -9,14 +9,53 @@
 
   function routinesToRows(routines) {
     const rows = [];
+
+    function flattenNodes(routine, nodes, parentId, depth, pathPrefix, orderCounter) {
+      (nodes || []).forEach(function (node, idx) {
+        orderCounter.val += 1;
+        const isGroup = node.type === 'group';
+        const currentPath = pathPrefix ? (pathPrefix + ' > ' + node.name) : node.name;
+        rows.push({
+          'Routine ID': routine.id,
+          'Routine Name': routine.name,
+          'Prepare Time (s)': routine.prepareTime !== undefined ? routine.prepareTime : 15,
+          'Rest Between Activities (s)': routine.betweenActivityRest,
+          'Activity Order': orderCounter.val,
+          'Sibling Order': idx + 1,
+          'Node ID': node.id,
+          'Parent Group ID': parentId || '',
+          'Node Type': isGroup ? 'GROUP' : 'EXERCISE',
+          'Tree Level': depth,
+          'Tree Path': currentPath,
+          'Activity': node.name,
+          'Number of Sets': node.sets,
+          'Time per Set (s)': isGroup ? 0 : node.timePerSet,
+          'Rest Between Sets (s)': node.restBetweenSets,
+          'Rest After Activity (s)': node.restAfterActivity !== undefined
+            ? node.restAfterActivity
+            : routine.betweenActivityRest
+        });
+        if (isGroup && Array.isArray(node.children) && node.children.length > 0) {
+          flattenNodes(routine, node.children, node.id, depth + 1, currentPath, orderCounter);
+        }
+      });
+    }
+
     (routines || []).forEach(function (routine) {
       const activities = Array.isArray(routine.activities) ? routine.activities : [];
       if (activities.length === 0) {
         rows.push({
           'Routine ID': routine.id,
           'Routine Name': routine.name,
+          'Prepare Time (s)': routine.prepareTime !== undefined ? routine.prepareTime : 15,
           'Rest Between Activities (s)': routine.betweenActivityRest,
           'Activity Order': 1,
+          'Sibling Order': 1,
+          'Node ID': global.SetTimerStorage.generateId('act'),
+          'Parent Group ID': '',
+          'Node Type': 'EXERCISE',
+          'Tree Level': 1,
+          'Tree Path': 'Activity 1',
           'Activity': 'Activity 1',
           'Number of Sets': 3,
           'Time per Set (s)': 30,
@@ -24,21 +63,7 @@
           'Rest After Activity (s)': routine.betweenActivityRest
         });
       } else {
-        activities.forEach(function (act, idx) {
-          rows.push({
-            'Routine ID': routine.id,
-            'Routine Name': routine.name,
-            'Rest Between Activities (s)': routine.betweenActivityRest,
-            'Activity Order': idx + 1,
-            'Activity': act.name,
-            'Number of Sets': act.sets,
-            'Time per Set (s)': act.timePerSet,
-            'Rest Between Sets (s)': act.restBetweenSets,
-            'Rest After Activity (s)': act.restAfterActivity !== undefined
-              ? act.restAfterActivity
-              : routine.betweenActivityRest
-          });
-        });
+        flattenNodes(routine, activities, '', 1, '', { val: 0 });
       }
     });
     return rows;
@@ -69,16 +94,28 @@
       const betweenRest = Math.max(0, parseInt(betweenRestRaw, 10));
       const safeBetweenRest = isNaN(betweenRest) ? 20 : betweenRest;
 
+      const prepareTimeRaw =
+        row['Prepare Time (s)'] !== undefined ? row['Prepare Time (s)'] :
+        row['Prepare Time'] !== undefined ? row['Prepare Time'] :
+        row['prepare_time'] !== undefined ? row['prepare_time'] : 15;
+      const parsedPrep = parseInt(prepareTimeRaw, 10);
+      const safePrep = isNaN(parsedPrep) ? 15 : Math.max(0, parsedPrep);
+
       if (!routineMap[routineKey]) {
         routineMap[routineKey] = {
           id: String(row['Routine ID'] || global.SetTimerStorage.generateId('routine')),
           name: routineName,
+          prepareTime: safePrep,
           betweenActivityRest: safeBetweenRest,
           updatedAt: new Date().toISOString(),
+          _rawNodes: [],
           activities: []
         };
         routineOrder.push(routineKey);
       }
+
+      const nodeTypeRaw = String(row['Node Type'] || row['Type'] || 'EXERCISE').trim().toUpperCase();
+      const isGroup = (nodeTypeRaw === 'GROUP' || nodeTypeRaw === 'SUBGROUP');
 
       const activityNameRaw =
         row['Activity'] !== undefined ? row['Activity'] :
@@ -87,7 +124,7 @@
 
       const setsRaw =
         row['Number of Sets'] !== undefined ? row['Number of Sets'] :
-        row['Sets'] !== undefined ? row['Sets'] : 3;
+        row['Sets'] !== undefined ? row['Sets'] : (isGroup ? 2 : 3);
 
       const timePerSetRaw =
         row['Time per Set (s)'] !== undefined ? row['Time per Set (s)'] :
@@ -104,22 +141,44 @@
         row['Rest After Activity'] !== undefined ? row['Rest After Activity'] : safeBetweenRest;
 
       const orderVal = parseInt(row['Activity Order'] !== undefined ? row['Activity Order'] : (idx + 1), 10);
+      const nodeId = String(row['Node ID'] || '').trim() || global.SetTimerStorage.generateId(isGroup ? 'grp' : 'act');
+      const parentId = String(row['Parent Group ID'] || '').trim();
 
-      routineMap[routineKey].activities.push({
+      routineMap[routineKey]._rawNodes.push({
         _order: isNaN(orderVal) ? (idx + 1) : orderVal,
-        id: global.SetTimerStorage.generateId('act'),
-        name: String(activityNameRaw || ('Activity ' + (idx + 1))).trim(),
+        _parentId: parentId,
+        id: nodeId,
+        type: isGroup ? 'group' : 'exercise',
+        name: String(activityNameRaw || (isGroup ? 'Group ' + (idx + 1) : 'Activity ' + (idx + 1))).trim(),
         sets: Math.max(1, parseInt(setsRaw, 10) || 1),
-        timePerSet: Math.max(1, parseInt(timePerSetRaw, 10) || 30),
+        timePerSet: isGroup ? 0 : Math.max(1, parseInt(timePerSetRaw, 10) || 30),
         restBetweenSets: isNaN(parseInt(restBetweenSetsRaw, 10)) ? 15 : Math.max(0, parseInt(restBetweenSetsRaw, 10)),
-        restAfterActivity: isNaN(parseInt(restAfterActivityRaw, 10)) ? safeBetweenRest : Math.max(0, parseInt(restAfterActivityRaw, 10))
+        restAfterActivity: isNaN(parseInt(restAfterActivityRaw, 10)) ? safeBetweenRest : Math.max(0, parseInt(restAfterActivityRaw, 10)),
+        collapsed: false,
+        children: isGroup ? [] : undefined
       });
     });
 
     return routineOrder.map(function (key) {
       const r = routineMap[key];
-      r.activities.sort(function (a, b) { return a._order - b._order; });
-      r.activities.forEach(function (a) { delete a._order; });
+      r._rawNodes.sort(function (a, b) { return a._order - b._order; });
+      const byId = {};
+      r._rawNodes.forEach(function (n) {
+        byId[n.id] = n;
+      });
+      const roots = [];
+      r._rawNodes.forEach(function (n) {
+        const pId = n._parentId;
+        delete n._order;
+        delete n._parentId;
+        if (pId && byId[pId] && byId[pId].type === 'group' && byId[pId] !== n) {
+          byId[pId].children.push(n);
+        } else {
+          roots.push(n);
+        }
+      });
+      delete r._rawNodes;
+      r.activities = roots;
       return global.SetTimerStorage.sanitizeRoutine(r);
     });
   }
@@ -136,10 +195,17 @@
       const ws = global.XLSX.utils.json_to_sheet(rows);
 
       ws['!cols'] = [
-        { wch: 24 },
+        { wch: 22 },
         { wch: 28 },
+        { wch: 18 },
         { wch: 26 },
         { wch: 15 },
+        { wch: 14 },
+        { wch: 22 },
+        { wch: 22 },
+        { wch: 14 },
+        { wch: 12 },
+        { wch: 36 },
         { wch: 26 },
         { wch: 16 },
         { wch: 18 },
@@ -154,8 +220,15 @@
       const headers = [
         'Routine ID',
         'Routine Name',
+        'Prepare Time (s)',
         'Rest Between Activities (s)',
         'Activity Order',
+        'Sibling Order',
+        'Node ID',
+        'Parent Group ID',
+        'Node Type',
+        'Tree Level',
+        'Tree Path',
         'Activity',
         'Number of Sets',
         'Time per Set (s)',

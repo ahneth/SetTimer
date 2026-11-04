@@ -18,6 +18,8 @@
   --accent-danger: #ef4444;
 
   /* Run Mode State Colors (Vibrant Full-Screen) */
+  --state-prepare-bg: #0284c7;        /* Bright Blue for Prepare */
+  --state-prepare-text: #ffffff;
   --state-activity-bg: #00c853;       /* Bright Green */
   --state-activity-text: #ffffff;
   --state-set-rest-bg: #ff6d00;       /* Bright Orange */
@@ -52,6 +54,11 @@ html, body {
 /* ==========================================================================
    Run Mode Full-Screen State Classes
    ========================================================================== */
+.run-state-prepare {
+  background-color: var(--state-prepare-bg) !important;
+  color: var(--state-prepare-text) !important;
+}
+
 .run-state-activity {
   background-color: var(--state-activity-bg) !important;
   color: var(--state-activity-text) !important;
